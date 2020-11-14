@@ -1,0 +1,261 @@
+{% extends 'base.html' %}
+
+{% block head %}
+<style>
+.jumbotron{
+    background-color:black;
+  }
+body{
+  background-color: rgb(0, 0, 0);
+}
+.btn{
+  background-color: rgb(41, 41, 41);
+  border-color: blueviolet;
+}
+</style>
+{% endblock %}
+
+
+{% block body %}
+<img style="border:5px solid rgb(59, 59, 59);" src="{{ url_for('camera')}}">
+
+<div class="jumbotron" >
+  <div class="row">
+    <div class="col-1"></div>
+    <div class="col-1"></div>
+    <div class="col-1">
+      <button class="btn btn-primary" style="width: 67px;" onmousedown="tilt_up();" onmouseup="stop();">Up</button>
+    </div>
+    <div class="col-1"></div>
+    <div class="col-1"></div>
+    <div class="col-1"></div>
+    <div class="col-1"></div>
+    <div class="col-1"></div>
+    <div class="col-1"></div>
+    <div class="col-3">
+      <button class="btn btn-primary" onmousedown="Windshield_Wiper();">Windshield Wiper</button>
+    </div>
+  </div>
+  <div class="row">
+    <div class="col-1"></div>
+    <div class="col-1">
+      <button class="btn btn-primary" onmousedown="pan_left();" onmouseup="stop();">Left</button>
+    </div>
+    <div class="col-1"></div>
+    <div class="col-1">
+      <button class="btn btn-primary" onmousedown="pan_right();" onmouseup="stop();">Right</button>
+    </div>
+    <div class="col-1"></div>
+    <div class="col-1"></div>
+    <div class="col-1"></div>
+    <div class="col-1"></div>
+    <div class="col-1"></div>
+    <div class="col-3">
+      <button class="btn btn-primary" onmousedown="Thermal_Camera();">Thermal Camera</button>
+    </div>
+  </div>
+  <div class="row">
+    <div class="col-1"></div>
+    <div class="col-1"></div>
+    <div class="col-1">
+      <button class="btn btn-primary" onmousedown="tilt_down();" onmouseup="stop();">Down</button>
+    </div>
+    <div class="col-1"></div>
+    <div class="col-1"></div>
+    <div class="col-1"></div>
+    <div class="col-1"></div>
+    <div class="col-1"></div>
+    <div class="col-1"></div>
+    <div class="col-3">
+      <button class="btn btn-primary" onmousedown="Visible_Light_Camera();">Visible Light Camera</button>
+    </div>
+  </div>
+  <div class="row">
+    <div class="col-1">
+      <button class="btn btn-primary" onmousedown="zoom_tele();" onmouseup="stop();">Zoom In</button>
+    </div>
+    <div class="col-1">
+      <button class="btn btn-primary" onmousedown="zoom_wide();" onmouseup="stop();">Zoom Out</button>
+    </div>
+    <div class="col-1">
+      <button class="btn btn-primary" onmousedown="focus_far();">Focus Far</button>
+    </div>
+    <div class="col-1">
+      <button class="btn btn-primary" onmousedown="focus_near();">Focus Near</button>
+    </div>
+    <div class="col-1">
+    </div>
+    <div class="col-1">
+      <button class="btn btn-primary" onmousedown="Goto_preset();">Go To Preset</button>
+    </div>
+    <div class="col-1">
+    </div>
+    <div class="col-1">
+      <button class="btn btn-primary" onmousedown="Set_preset();">Set Preset</button>
+    </div>
+    <div class="col-1">
+    </div>
+    <div class="col-2">
+      <button class="btn btn-primary" onmousedown="OSD_menu();">Open OSD Menu</button>
+    </div>
+  </div>
+</div>
+
+
+
+{% endblock %}
+{% block script %}
+<script>
+  function pan_left() {
+    var message = "pan left message"
+    fetch('/pan_left',
+      {
+        method: "POST",
+        credentials: "include",
+        body: JSON.stringify(message),
+        headers: new Headers({ "content-type": "application/json" })
+      })
+  }
+  function stop() {
+    var message = "stop message"
+    fetch('/stop',
+      {
+        method: "POST",
+        credentials: "include",
+        body: JSON.stringify(message),
+        headers: new Headers({ "content-type": "application/json" })
+      })
+  }
+  function tilt_up() {
+    var message = "tilt up message"
+    fetch('/tilt_up',
+      {
+        method: "POST",
+        credentials: "include",
+        body: JSON.stringify(message),
+        headers: new Headers({ "content-type": "application/json" })
+      })
+  }
+  function tilt_down() {
+    var message = "tilt down message"
+    fetch('/tilt_down',
+      {
+        method: "POST",
+        credentials: "include",
+        body: JSON.stringify(message),
+        headers: new Headers({ "content-type": "application/json" })
+      })
+  }
+  function pan_right() {
+    var message = "pan right message"
+    fetch('/pan_right',
+      {
+        method: "POST",
+        credentials: "include",
+        body: JSON.stringify(message),
+        headers: new Headers({ "content-type": "application/json" })
+      })
+  }
+  function zoom_tele() {
+    var message = "zoom in message"
+    fetch('/zoom_tele',
+      {
+        method: "POST",
+        credentials: "include",
+        body: JSON.stringify(message),
+        headers: new Headers({ "content-type": "application/json" })
+      })
+  }
+  function zoom_wide() {
+    var message = "zoom out message"
+    fetch('/zoom_wide',
+      {
+        method: "POST",
+        credentials: "include",
+        body: JSON.stringify(message),
+        headers: new Headers({ "content-type": "application/json" })
+      })
+  }
+  function focus_near() {
+    var message = "focus near message"
+    fetch('/focus_near',
+      {
+        method: "POST",
+        credentials: "include",
+        body: JSON.stringify(message),
+        headers: new Headers({ "content-type": "application/json" })
+      })
+  }
+  function focus_far() {
+    var message = "focus far message"
+    fetch('/focus_far',
+      {
+        method: "POST",
+        credentials: "include",
+        body: JSON.stringify(message),
+        headers: new Headers({ "content-type": "application/json" })
+      })
+  }
+  function OSD_menu() {
+    var message = "OSD menu message"
+    fetch('/OSD_menu',
+      {
+        method: "POST",
+        credentials: "include",
+        body: JSON.stringify(message),
+        headers: new Headers({ "content-type": "application/json" })
+      })
+  }
+  function Thermal_Camera() {
+    var message = "switch to thermal cam message"
+    fetch('/Thermal_Camera',
+      {
+        method: "POST",
+        credentials: "include",
+        body: JSON.stringify(message),
+        headers: new Headers({ "content-type": "application/json" })
+      })
+  }
+  function Visible_Light_Camera() {
+    var message = "Visible Camera message"
+    fetch('/Visible_Light_Camera',
+      {
+        method: "POST",
+        credentials: "include",
+        body: JSON.stringify(message),
+        headers: new Headers({ "content-type": "application/json" })
+      })
+  }
+  function Windshield_Wiper() {
+    var message = "Windshield Wiper message"
+    fetch('/Windshield_Wiper',
+      {
+        method: "POST",
+        credentials: "include",
+        body: JSON.stringify(message),
+        headers: new Headers({ "content-type": "application/json" })
+      })
+  }
+  function Goto_preset() {
+    var message = "go to preset message"
+    fetch('/Goto_preset',
+      {
+        method: "POST",
+        credentials: "include",
+        body: JSON.stringify(message),
+        headers: new Headers({ "content-type": "application/json" })
+      })
+  }
+  function Set_preset() {
+    var message = "set preset message"
+    fetch('/Set_preset',
+      {
+        method: "POST",
+        credentials: "include",
+        body: JSON.stringify(message),
+        headers: new Headers({ "content-type": "application/json" })
+      })
+  }
+
+</script>
+{% endblock %}
