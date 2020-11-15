@@ -1,7 +1,9 @@
 #object detection start
 from time import sleep, strftime
 import cv2
+import flask
 import numpy as np
+import numpy
 from pelcoD import pelcoD
 from tkinter import *
 import datetime, threading, os, serial
@@ -11,6 +13,9 @@ from flask import Flask
 from flask import render_template
 from flask import Response, make_response, jsonify, request
 import time
+import atexit
+from sys import exit
+import signal
 # initialize flask app
 app = Flask(__name__)
 
@@ -161,6 +166,23 @@ def Start_New_File():
         print(req)
         res = make_response(jsonify({"message": "JSON received"}), 200)
         return res
+@app.route('/Exit_program', methods=["POST"])       
+def Exit_program():
+        req = request.get_json()
+        print(req)
+        #os.kill(os.getpid(),signal.SIGINT)
+        func = request.environ.get('werkzeug.server.shutdown')
+        func()
+        res = make_response(jsonify({"message": "JSON received"}), 200)
+        return res
+def exit_handler():
+    global out, ser, cam
+    print("Cleaning and Saving")
+    out.release()
+    ser.close()
+    cam.release()
+    
+
 # Run each frame of the camera feed through the image detection model
 def getimage():
     starttime = time.time()
@@ -169,14 +191,15 @@ def getimage():
         global everyotherframe, height, width
         global outputframe, sync
         success, img = cam.read()
-        height = img.shape[0]
-        width = img.shape[1]
+        
         if not success:
             continue
         currenttime=time.time()
         if (currenttime-starttime) > fpslimit:
             everyotherframe = not everyotherframe
             if everyotherframe == True:
+                height = img.shape[0]
+                width = img.shape[1]
                 blob = cv2.dnn.blobFromImage(img, 1/255, (416,416), (0,0,0),swapRB=True, crop=False)
                 net.setInput(blob)
                 output_layers_names = net.getUnconnectedOutLayersNames()
@@ -216,7 +239,7 @@ def getimage():
             starttime = time.time()
 # Convert the processed image to something displayable
 def writingVideo():
-    global overwrite, outputframe, height, width
+    global overwrite, outputframe, height, width, out
     starttime = time.time()
     fpslimit = .025
     td = datetime.datetime.now()
@@ -256,18 +279,20 @@ def daytracker():
 def frametojpeg():
     global outputframe, sync
     while True:
-        with sync:
-            if outputframe is None:
-                continue
-            (flag,encodedimage)=cv2.imencode(".jpeg",outputframe)
-            if not flag:
-                continue
-            yield(b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + 
-            bytearray(encodedimage) + b'\r\n')
+        if outputframe is None:
+            continue
+        encodedimage = numpy.ndarray
+        (flag,encodedimage)=cv2.imencode(".jpeg",outputframe)
+        if not flag:
+            continue
+        yield(b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + 
+        bytearray(encodedimage) + b'\r\n')
 
 
 if __name__ == '__main__':
+    atexit.register(exit_handler)
     # Initialize all of the stuff
+    out = cv2.VideoWriter()
     everyotherframe = True
     cam = cv2.VideoCapture(0, cv2.CAP_DSHOW)
     cv2.setUseOptimized(True)
@@ -291,15 +316,11 @@ if __name__ == '__main__':
     d = threading.Thread(target=daytracker)
     d.daemon = True
     d.start()
-    
     # Run flask with debug mode
-    app.run(host = "127.0.0.1",port = "5000",debug = True,threaded = True,use_reloader = False)
+    app.run(host = "127.0.0.1",port = "5000",debug = False,threaded = True,use_reloader = False)
+    
 
 
-# Cleanup
-out.release()
-ser.close()
-cam.release()
 
 
 

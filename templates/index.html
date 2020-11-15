@@ -50,6 +50,7 @@ body{
       <button class="btn btn-primary" onmousedown="Tour_1();">Start Tour 1</button>
       <button class="btn btn-primary" onmousedown="Tour_2();">Start Tour 2</button>
       <button class="btn btn-primary" onmousedown="Start_New_File();">Save Current File</button>
+      <button class="btn btn-primary" onmousedown="Exit_program();">Exit_program</button>
     </div>
   </div>
 </div>
@@ -256,6 +257,16 @@ body{
   function Start_New_File() {
     var message = "creating new video"
     fetch('/Start_New_File',
+      {
+        method: "POST",
+        credentials: "include",
+        body: JSON.stringify(message),
+        headers: new Headers({ "content-type": "application/json" })
+      })
+  }
+  function Exit_program() {
+    var message = "exiting program"
+    fetch('/Exit_program',
       {
         method: "POST",
         credentials: "include",
