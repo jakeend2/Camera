@@ -1,20 +1,18 @@
 #object detection start
+from time import sleep, strftime
 import cv2
 import numpy as np
-import os.path
 from pelcoD import pelcoD
 from tkinter import *
-import binascii
-import socket, datetime, threading, os, serial
+import datetime, threading, os, serial
 from tkinter import messagebox
-from PIL import Image, ImageTk
+from PIL import Image
 from flask import Flask
 from flask import render_template
 from flask import Response, make_response, jsonify, request
-import imutils
+import time
 # initialize flask app
 app = Flask(__name__)
-
 
 # open the home page of the webserver
 @app.route('/')
@@ -122,77 +120,139 @@ def Windshield_Wiper():
         return res
 @app.route('/Set_preset', methods=["POST"])       
 def Set_preset():
-        ser.write(camsocket.setpreset(3))
         req = request.get_json()
-        print(req)
+        print(req['flabber'])
+        number = int(req['flabber'])
+        ser.write(camsocket.setpreset(number))
         res = make_response(jsonify({"message": "JSON received"}), 200)
         return res
 @app.route('/Goto_preset', methods=["POST"])       
 def Goto_preset():
-        ser.write(camsocket.gotopreset(3))
+        req = request.get_json()
+        print(req['flabber'])
+        number = int(req['flabber'])
+        ser.write(camsocket.gotopreset(number))
+        res = make_response(jsonify({"message": "JSON received"}), 200)
+        return res
+@app.route('/Tour_2', methods=["POST"])       
+def Tour_2():
+        ser.write(camsocket.gotopreset(82))
+        req = request.get_json()
+        print(req)
+        res = make_response(jsonify({"message": "JSON received"}), 200)
+        return res
+@app.route('/Tour_1', methods=["POST"])       
+def Tour_1():
+        ser.write(camsocket.gotopreset(81))
+        req = request.get_json()
+        print(req)
+        res = make_response(jsonify({"message": "JSON received"}), 200)
+        return res
+@app.route('/Start_New_File', methods=["POST"])       
+def Start_New_File():
+        global overwrite
+        overwrite = True
+        sleep(3)
+        overwrite = False
+        v = threading.Thread(target = writingVideo)
+        v.daemon = True
+        v.start()
         req = request.get_json()
         print(req)
         res = make_response(jsonify({"message": "JSON received"}), 200)
         return res
 # Run each frame of the camera feed through the image detection model
 def getimage():
+    starttime = time.time()
+    fpslimit = .025
     while True:
-        global everyotherframe, DT, out
+        global everyotherframe, height, width
         global outputframe, sync
         success, img = cam.read()
+        height = img.shape[0]
+        width = img.shape[1]
         if not success:
             continue
-        img = imutils.resize(img, width=1024, height = 768)
-        everyotherframe = False
-        if everyotherframe == True:
-            height = img.shape[0]
-            width = img.shape[1]
-            blob = cv2.dnn.blobFromImage(img, 1/255, (416,416), (0,0,0),swapRB=True, crop=False)
-            net.setInput(blob)
-            output_layers_names = net.getUnconnectedOutLayersNames()
-            layerOutputs = net.forward(output_layers_names)
-            boxes = []
-            confidences = []
-            predclasss = []
-            for output in layerOutputs:
-                for detection in output:
-                    scores = detection[5:]
-                    predclass = np.argmax(scores)
-                    confidence = scores[predclass]
-                    if predclass != 0:
-                        continue
-                    if confidence > 0.2:
-                        center_x = int(detection[0]*width)
-                        center_y = int(detection[1]*height)
-                        w = int(detection[2]*width)
-                        h = int(detection[3]*height)
-                        left = int(center_x - w/2)
-                        top = int(center_y - h/2)
-                        boxes.append([left,top,w,h])
-                        confidences.append((float(confidence)))
-                        predclasss.append(predclass)
-                # Cull and Draw boxes on image
-            FilterBoxes = cv2.dnn.NMSBoxes(boxes, confidences,0.2,0.2)
-            font = cv2.FONT_HERSHEY_PLAIN
-            if len(boxes) != 0:
-                for i in FilterBoxes.flatten():
-                    left,top,w,h = boxes[i]
-                    label = str(objNames[predclasss[i]])
-                    confidence = str(round(confidences[i], 2))
-                    cv2.rectangle(img, (left,top), (left+w, top+h), (255,255,255), 3)
-                    cv2.putText(img, label + confidence, (left,round(top-(20))), font, 1.2, (242,207,7), 2)
-        out.write(img)
-        currentDT = datetime.datetime.now()
-        if (currentDT.day - (DT.day)) > 0:
-            print('creating next video file')
-            out.release()
-            DT = datetime.datetime.now()
-            formatDT = (str(DT.year)+'-'+str(DT.month)+'-'+str(DT.day)+'-'+str(DT.hour)+'-'+str(DT.minute))
-            out = cv2.VideoWriter(formatDT+'.avi',cv2.VideoWriter_fourcc('D','I','V','X'),18,(1024,768))
-            print(formatDT)
-        with sync:  
-            outputframe = img.copy()
+        currenttime=time.time()
+        if (currenttime-starttime) > fpslimit:
+            everyotherframe = not everyotherframe
+            if everyotherframe == True:
+                blob = cv2.dnn.blobFromImage(img, 1/255, (416,416), (0,0,0),swapRB=True, crop=False)
+                net.setInput(blob)
+                output_layers_names = net.getUnconnectedOutLayersNames()
+                layerOutputs = net.forward(output_layers_names)
+                boxes = []
+                confidences = []
+                predclasss = []
+                for output in layerOutputs:
+                    for detection in output:
+                        scores = detection[5:]
+                        predclass = np.argmax(scores)
+                        confidence = scores[predclass]
+                        if predclass != 0:
+                            continue
+                        if confidence > 0.2:
+                            center_x = int(detection[0]*width)
+                            center_y = int(detection[1]*height)
+                            w = int(detection[2]*width)
+                            h = int(detection[3]*height)
+                            left = int(center_x - w/2)
+                            top = int(center_y - h/2)
+                            boxes.append([left,top,w,h])
+                            confidences.append((float(confidence)))
+                            predclasss.append(predclass)
+                    # Cull and Draw boxes on image
+                FilterBoxes = cv2.dnn.NMSBoxes(boxes, confidences,0.2,0.2)
+                font = cv2.FONT_HERSHEY_PLAIN
+                if len(boxes) != 0:
+                    for i in FilterBoxes.flatten():
+                        left,top,w,h = boxes[i]
+                        label = str(objNames[predclasss[i]])
+                        confidence = str(round(confidences[i], 2))
+                        cv2.rectangle(img, (left,top), (left+w, top+h), (255,255,255), 3)
+                        cv2.putText(img, label + confidence, (left,round(top-(20))), font, 1.2, (242,207,7), 2)
+            with sync:  
+                outputframe = img
+            starttime = time.time()
 # Convert the processed image to something displayable
+def writingVideo():
+    global overwrite, outputframe, height, width
+    starttime = time.time()
+    fpslimit = .025
+    td = datetime.datetime.now()
+    date = td.strftime("%d-%m-%Y-%H-%M-%S")
+    success, img = cam.read()
+    height = img.shape[0]
+    width = img.shape[1]
+    out = cv2.VideoWriter(date+'.avi',cv2.VideoWriter_fourcc('H','2','6','4'),30,(width,height))
+    while True:
+        currenttime=time.time()
+        #with sync:
+        if overwrite is True:
+            break
+        if (currenttime-starttime) > fpslimit:
+            out.write(outputframe)
+            starttime = time.time()
+    out.release()
+    return 
+
+def daytracker():
+    global overwrite
+    while True:
+        daytracker = True
+        dt = datetime.datetime.now()
+        
+        time.sleep(((24 - dt.hour - 1) * 60 * 60) + ((60 - dt.minute - 1) * 60) + (60 - dt.second))
+        overwrite = True
+        sleep(10)
+        overwrite = False
+        v = threading.Thread(target = writingVideo)
+        v.daemon = True
+        v.start()
+        print('creating new video')
+
+
+
 def frametojpeg():
     global outputframe, sync
     while True:
@@ -202,18 +262,16 @@ def frametojpeg():
             (flag,encodedimage)=cv2.imencode(".jpeg",outputframe)
             if not flag:
                 continue
-            encodedimage = bytearray()
             yield(b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + 
             bytearray(encodedimage) + b'\r\n')
+
+
 if __name__ == '__main__':
     # Initialize all of the stuff
     everyotherframe = True
     cam = cv2.VideoCapture(0, cv2.CAP_DSHOW)
     cv2.setUseOptimized(True)
     cv2.useOptimized()
-    DT = datetime.datetime.now()
-    formatDT = (str(DT.year)+'-'+str(DT.month)+'-'+str(DT.day)+'-'+str(DT.hour)+'-'+str(DT.minute))
-    out = cv2.VideoWriter(formatDT+'.avi',cv2.VideoWriter_fourcc('D','I','V','X'),18,(1024,768))
     outputframe = None
     sync = threading.Lock()
     ser = serial.Serial('COM4',9600)
@@ -226,6 +284,14 @@ if __name__ == '__main__':
     t = threading.Thread(target = getimage)
     t.daemon = True
     t.start()
+    overwrite = False
+    v = threading.Thread(target = writingVideo)
+    v.daemon = True
+    v.start()
+    d = threading.Thread(target=daytracker)
+    d.daemon = True
+    d.start()
+    
     # Run flask with debug mode
     app.run(host = "127.0.0.1",port = "5000",debug = True,threaded = True,use_reloader = False)
 
