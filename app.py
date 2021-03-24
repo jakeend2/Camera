@@ -16,6 +16,7 @@ import time
 import atexit
 from sys import exit
 import signal
+import logging
 # initialize flask app
 app = Flask(__name__)
 
@@ -181,6 +182,7 @@ def exit_handler():
     out.release()
     ser.close()
     cam.release()
+    input("Press Enter to continue...")
     
 
 # Run each frame of the camera feed through the image detection model
@@ -299,7 +301,9 @@ if __name__ == '__main__':
     cv2.useOptimized()
     outputframe = None
     sync = threading.Lock()
-    ser = serial.Serial('COM4',9600)
+    serialportname = input("input com port name: ")
+    print(serialportname)
+    ser = serial.Serial(serialportname,9600)
     camsocket =  pelcoD()
     objNames = []
     with open('coco.names','r') as f:

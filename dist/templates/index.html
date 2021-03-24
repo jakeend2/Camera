@@ -1,0 +1,279 @@
+{% extends 'base.html' %}
+
+{% block head %}
+<style>
+.jumbotron{
+    background-color:black;
+  }
+body{
+  background-color: rgb(0, 0, 0);
+}
+.btn{
+  background-color: rgb(41, 41, 41);
+  border-color: rgb(255, 255, 255);
+}
+.row{
+  padding: 10px;
+}
+</style>
+{% endblock %}
+
+
+{% block body %}
+
+<div class="row">
+  <div class="col-2">
+    <div class="btn-group-vertical" role="group">
+      <button class="btn btn-primary" onmousedown="focus_near();">Focus Near</button>
+      <button class="btn btn-primary" onmousedown="focus_far();">Focus Far</button>
+      <button class="btn btn-primary" onmousedown="zoom_wide();" onmouseup="stop();">Zoom Out</button>
+      <button class="btn btn-primary" onmousedown="zoom_tele();" onmouseup="stop();">Zoom In</button>
+      <button class="btn btn-primary" onmousedown="Set_preset();">Set Preset</button>
+      <button class="btn btn-primary" onmousedown="Goto_preset();">Go To Preset</button>
+    </div>
+    <div class="input-group input-group-sm mb-3">
+      <div class="input-group-prepend">
+        <span class="input-group-text" id="inputGroup-sizing-sm" style="background-color: rgb(59, 59, 59); color: rgb(255, 255, 255);">Preset</span>
+      </div>
+      <input type="text" id="flabber" class="form-control" style="border-color: rgb(255, 255, 255);">
+    </div>
+  </div>
+  <div class="col-8">
+    <img class="img-fluid" alt="Responsive image" style="border:5px solid rgb(59, 59, 59);" src="{{ url_for('camera')}}">
+  </div>
+  <div class="col-2">
+    <div class="btn-group-vertical Responsive" role="group" aria-label="Basic example">
+      <button class="btn btn-primary" onmousedown="Windshield_Wiper();">Windshield Wiper</button>
+      <button class="btn btn-primary" onmousedown="Thermal_Camera();">Thermal Camera</button>
+      <button class="btn btn-primary" onmousedown="Visible_Light_Camera();">Visible Light Camera</button>
+      <button class="btn btn-primary" onmousedown="OSD_menu();">Open OSD Menu</button>
+      <button class="btn btn-primary" onmousedown="Tour_1();">Start Tour 1</button>
+      <button class="btn btn-primary" onmousedown="Tour_2();">Start Tour 2</button>
+      <button class="btn btn-primary" onmousedown="Start_New_File();">Save Current File</button>
+      <button class="btn btn-primary" onmousedown="Exit_program();">Exit_program</button>
+    </div>
+  </div>
+</div>
+<div class="row">
+  <div class="col-2">
+    <button class="btn btn-primary" style="width: 180px;" onmousedown="tilt_up();" onmouseup="stop();">Up</button>
+  </div>
+</div>
+  <div class="row">
+    <div class="col-2">
+      <div class="btn-group" role="group">
+        <button class="btn btn-primary" onmousedown="pan_left();" onmouseup="stop();">Left</button>
+        <button class="btn btn-primary" onmousedown="tilt_down();" onmouseup="stop();">Down</button>
+        <button class="btn btn-primary" onmousedown="pan_right();" onmouseup="stop();">Right</button>
+      </div>
+    </div>
+    <div class="col-4"></div>
+    <div class="col-6"></div>
+  </div>
+
+
+
+
+{% endblock %}
+{% block script %}
+<script>
+  function pan_left() {
+    var message = "pan left message"
+    fetch('/pan_left',
+      {
+        method: "POST",
+        credentials: "include",
+        body: JSON.stringify(message),
+        headers: new Headers({ "content-type": "application/json" })
+      })
+  }
+  function stop() {
+    var message = "stop message"
+    fetch('/stop',
+      {
+        method: "POST",
+        credentials: "include",
+        body: JSON.stringify(message),
+        headers: new Headers({ "content-type": "application/json" })
+      })
+  }
+  function tilt_up() {
+    var message = "tilt up message"
+    fetch('/tilt_up',
+      {
+        method: "POST",
+        credentials: "include",
+        body: JSON.stringify(message),
+        headers: new Headers({ "content-type": "application/json" })
+      })
+  }
+  function tilt_down() {
+    var message = "tilt down message"
+    fetch('/tilt_down',
+      {
+        method: "POST",
+        credentials: "include",
+        body: JSON.stringify(message),
+        headers: new Headers({ "content-type": "application/json" })
+      })
+  }
+  function pan_right() {
+    var message = "pan right message"
+    fetch('/pan_right',
+      {
+        method: "POST",
+        credentials: "include",
+        body: JSON.stringify(message),
+        headers: new Headers({ "content-type": "application/json" })
+      })
+  }
+  function zoom_tele() {
+    var message = "zoom in message"
+    fetch('/zoom_tele',
+      {
+        method: "POST",
+        credentials: "include",
+        body: JSON.stringify(message),
+        headers: new Headers({ "content-type": "application/json" })
+      })
+  }
+  function zoom_wide() {
+    var message = "zoom out message"
+    fetch('/zoom_wide',
+      {
+        method: "POST",
+        credentials: "include",
+        body: JSON.stringify(message),
+        headers: new Headers({ "content-type": "application/json" })
+      })
+  }
+  function focus_near() {
+    var message = "focus near message"
+    fetch('/focus_near',
+      {
+        method: "POST",
+        credentials: "include",
+        body: JSON.stringify(message),
+        headers: new Headers({ "content-type": "application/json" })
+      })
+  }
+  function focus_far() {
+    var message = "focus far message"
+    fetch('/focus_far',
+      {
+        method: "POST",
+        credentials: "include",
+        body: JSON.stringify(message),
+        headers: new Headers({ "content-type": "application/json" })
+      })
+  }
+  function OSD_menu() {
+    var message = "OSD menu message"
+    fetch('/OSD_menu',
+      {
+        method: "POST",
+        credentials: "include",
+        body: JSON.stringify(message),
+        headers: new Headers({ "content-type": "application/json" })
+      })
+  }
+  function Thermal_Camera() {
+    var message = "switch to thermal cam message"
+    fetch('/Thermal_Camera',
+      {
+        method: "POST",
+        credentials: "include",
+        body: JSON.stringify(message),
+        headers: new Headers({ "content-type": "application/json" })
+      })
+  }
+  function Visible_Light_Camera() {
+    var message = "Visible Camera message"
+    fetch('/Visible_Light_Camera',
+      {
+        method: "POST",
+        credentials: "include",
+        body: JSON.stringify(message),
+        headers: new Headers({ "content-type": "application/json" })
+      })
+  }
+  function Windshield_Wiper() {
+    var message = "Windshield Wiper message"
+    fetch('/Windshield_Wiper',
+      {
+        method: "POST",
+        credentials: "include",
+        body: JSON.stringify(message),
+        headers: new Headers({ "content-type": "application/json" })
+      })
+  }
+  function Goto_preset() {
+    var message = document.getElementById("flabber");
+    var preset =  {
+        flabber: flabber.value
+    };
+    fetch('/Goto_preset',
+      {
+        method: "POST",
+        credentials: "include",
+        body: JSON.stringify(preset),
+        headers: new Headers({ "content-type": "application/json" })
+      })
+
+  }
+  function Set_preset() {
+    var message = document.getElementById("flabber");
+    var preset =  {
+        flabber: flabber.value
+    };
+    fetch('/Set_preset',
+      {
+        method: "POST",
+        credentials: "include",
+        body: JSON.stringify(preset),
+        headers: new Headers({ "content-type": "application/json" })
+      })
+  }
+  function Tour_1() {
+    var message = "Tour 1 started"
+    fetch('/Tour_1',
+      {
+        method: "POST",
+        credentials: "include",
+        body: JSON.stringify(message),
+        headers: new Headers({ "content-type": "application/json" })
+      })
+  }
+  function Tour_2() {
+    var message = "Tour 2 started"
+    fetch('/Tour_2',
+      {
+        method: "POST",
+        credentials: "include",
+        body: JSON.stringify(message),
+        headers: new Headers({ "content-type": "application/json" })
+      })
+  }
+  function Start_New_File() {
+    var message = "creating new video"
+    fetch('/Start_New_File',
+      {
+        method: "POST",
+        credentials: "include",
+        body: JSON.stringify(message),
+        headers: new Headers({ "content-type": "application/json" })
+      })
+  }
+  function Exit_program() {
+    var message = "exiting program"
+    fetch('/Exit_program',
+      {
+        method: "POST",
+        credentials: "include",
+        body: JSON.stringify(message),
+        headers: new Headers({ "content-type": "application/json" })
+      })
+  }
+
+</script>
+{% endblock %}

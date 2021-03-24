@@ -1,0 +1,2 @@
+root - WARNING - This will get logged to a file
+werkzeug - INFO -  * Running on http://127.0.0.1:5000/ (Press CTRL+C to quit)
