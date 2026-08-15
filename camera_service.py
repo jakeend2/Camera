@@ -16,6 +16,7 @@ browsers and owns the RS-485 link for Pelco-D PTZ commands.
 
 from __future__ import annotations
 
+import json
 import logging
 import logging.handlers
 import os
@@ -28,6 +29,7 @@ import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+import paho.mqtt.client as mqtt
 import serial
 from flask import Flask, Response, jsonify, make_response, render_template, request
 
@@ -75,9 +77,21 @@ MIN_FREE_GB = 50             # hard floor; oldest whole days go first
 SERIAL_PORT = "/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_AM00KHR1-if00-port0"
 SERIAL_PORT_FALLBACK = "/dev/ttyUSB0"
 SERIAL_BAUD = 9600
+PTZ_SPEED = 25               # Pelco-D pan/tilt speed, 0-63
 
 LISTEN_HOST = "0.0.0.0"
 LISTEN_PORT = 5000
+
+# MQTT. Credentials arrive from /etc/camera-service.env through systemd's
+# EnvironmentFile, deliberately outside the repo so they are never committed.
+# With no credentials the bridge simply stays off and the camera is unaffected.
+MQTT_HOST = os.environ.get("MQTT_HOST", "127.0.0.1")
+MQTT_PORT = int(os.environ.get("MQTT_PORT", "1883"))
+MQTT_USERNAME = os.environ.get("MQTT_USERNAME") or None
+MQTT_PASSWORD = os.environ.get("MQTT_PASSWORD") or None
+MQTT_PREFIX = os.environ.get("MQTT_PREFIX", "camera")
+MQTT_ENABLED = bool(MQTT_USERNAME and MQTT_PASSWORD)
+MQTT_STATE_INTERVAL = 30     # seconds between retained state publishes
 
 _FONT_CANDIDATES = (
     "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
@@ -469,6 +483,11 @@ class PTZ:
                 self._ser = None
                 return False
 
+    @property
+    def connected(self) -> bool:
+        with self._lock:
+            return self._ser is not None and self._ser.is_open
+
     def close(self) -> None:
         with self._lock:
             if self._ser is not None:
@@ -477,6 +496,69 @@ class PTZ:
                 except Exception:
                     pass
                 self._ser = None
+
+
+# ---------------------------------------------------------------------------
+# PTZ command vocabulary - one source of truth for both HTTP and MQTT
+# ---------------------------------------------------------------------------
+# action -> (pelcoD method, fixed arguments)
+PTZ_ACTIONS = {
+    "pan_left":             ("panleft",    (PTZ_SPEED,)),
+    "pan_right":            ("panright",   (PTZ_SPEED,)),
+    "tilt_up":              ("tiltup",     (PTZ_SPEED,)),
+    "tilt_down":            ("tiltdown",   (PTZ_SPEED,)),
+    "stop":                 ("stop",       ()),
+    "zoom_tele":            ("zoomtele",   ()),
+    "zoom_wide":            ("zoomwide",   ()),
+    "focus_near":           ("focusnear",  ()),
+    "focus_far":            ("focusfar",   ()),
+    "osd_menu":             ("auxon",      (2,)),
+    "thermal_camera":       ("auxon",      (4,)),
+    "visible_light_camera": ("auxoff",     (4,)),
+    "windshield_wiper":     ("auxon",      (1,)),
+    "tour_1":               ("gotopreset", (81,)),
+    "tour_2":               ("gotopreset", (82,)),
+}
+
+# Actions that take a preset number rather than fixed arguments.
+PTZ_PRESET_ACTIONS = {"set_preset": "setpreset", "goto_preset": "gotopreset"}
+
+# The URLs the shipped web UI already calls, mapped onto the actions above.
+# Keys must not change - templates/index.html posts to these exact paths.
+HTTP_PTZ_ROUTES = {
+    "/pan_left": "pan_left",
+    "/pan_right": "pan_right",
+    "/tilt_up": "tilt_up",
+    "/tilt_down": "tilt_down",
+    "/stop": "stop",
+    "/zoom_tele": "zoom_tele",
+    "/zoom_wide": "zoom_wide",
+    "/focus_near": "focus_near",
+    "/focus_far": "focus_far",
+    "/OSD_menu": "osd_menu",
+    "/Thermal_Camera": "thermal_camera",
+    "/Visible_Light_Camera": "visible_light_camera",
+    "/Windshield_Wiper": "windshield_wiper",
+    "/Tour_1": "tour_1",
+    "/Tour_2": "tour_2",
+}
+
+
+def execute_ptz(action: str, preset: int | None = None) -> tuple[bool, str]:
+    """Run one PTZ action. Returns (ok, error message)."""
+    if ptz is None:
+        return False, "no serial link"
+    if action in PTZ_PRESET_ACTIONS:
+        if preset is None:
+            return False, "preset number required"
+        if not 1 <= preset <= 255:
+            return False, "preset out of range"
+        return ptz.send(PTZ_PRESET_ACTIONS[action], preset), ""
+    entry = PTZ_ACTIONS.get(action)
+    if entry is None:
+        return False, f"unknown action '{action}'"
+    method, args = entry
+    return ptz.send(method, *args), ""
 
 
 # ---------------------------------------------------------------------------
@@ -510,56 +592,42 @@ def camera():
                     mimetype="multipart/x-mixed-replace; boundary=frame")
 
 
-def ptz_route(rule: str, command: str, *args) -> None:
-    """Register a POST endpoint that emits one fixed Pelco-D command."""
-    def view():
-        ok = ptz.send(command, *args) if ptz else False
-        return make_response(jsonify({"ok": ok, "command": command}), 200)
-    view.__name__ = f"ptz_{rule.strip('/')}"
-    app.route(rule, methods=["POST"])(view)
+def _register_ptz_routes() -> None:
+    """Expose every PTZ action at the URL the existing web UI already uses."""
+    for rule, action in HTTP_PTZ_ROUTES.items():
+        def view(action=action):
+            ok, err = execute_ptz(action)
+            return make_response(
+                jsonify({"ok": ok, "action": action, "error": err}), 200
+            )
+        view.__name__ = f"ptz_{action}"
+        app.route(rule, methods=["POST"])(view)
 
 
-# Movement
-ptz_route("/pan_left", "panleft", 25)
-ptz_route("/pan_right", "panright", 25)
-ptz_route("/tilt_up", "tiltup", 25)
-ptz_route("/tilt_down", "tiltdown", 25)
-ptz_route("/stop", "stop")
-# Lens
-ptz_route("/zoom_tele", "zoomtele")
-ptz_route("/zoom_wide", "zoomwide")
-ptz_route("/focus_near", "focusnear")
-ptz_route("/focus_far", "focusfar")
-# MIC 612 auxiliaries
-ptz_route("/OSD_menu", "auxon", 2)
-ptz_route("/Thermal_Camera", "auxon", 4)
-ptz_route("/Visible_Light_Camera", "auxoff", 4)
-ptz_route("/Windshield_Wiper", "auxon", 1)
-# Tours live on presets 81 and 82
-ptz_route("/Tour_1", "gotopreset", 81)
-ptz_route("/Tour_2", "gotopreset", 82)
+_register_ptz_routes()
 
 
 @app.route("/Set_preset", methods=["POST"])
 def set_preset():
-    return _preset("setpreset")
+    return _preset("set_preset")
 
 
 @app.route("/Goto_preset", methods=["POST"])
 def goto_preset():
-    return _preset("gotopreset")
+    return _preset("goto_preset")
 
 
-def _preset(command: str):
+def _preset(action: str):
     payload = request.get_json(silent=True) or {}
     try:
         number = int(payload.get("flabber"))
     except (TypeError, ValueError):
         return make_response(jsonify({"ok": False, "error": "bad preset"}), 400)
-    if not 1 <= number <= 255:
-        return make_response(jsonify({"ok": False, "error": "out of range"}), 400)
-    ok = ptz.send(command, number) if ptz else False
-    return make_response(jsonify({"ok": ok, "preset": number}), 200)
+    ok, err = execute_ptz(action, number)
+    status = 200 if ok or not err else 400
+    return make_response(
+        jsonify({"ok": ok, "preset": number, "error": err}), status
+    )
 
 
 @app.route("/Start_New_File", methods=["POST"])
@@ -585,20 +653,137 @@ def _deferred_exit() -> None:
     os._exit(0)
 
 
-@app.route("/health")
-def health():
+def current_state() -> dict:
+    """One snapshot of service health, shared by /health and MQTT."""
     current = VIDEO_DIR / f"{date.today():%Y-%m-%d}.{RECORD_EXT}"
-    return jsonify({
+    exists = current.exists()
+    return {
         "recording": recorder.alive,
         "ffmpeg_restarts": recorder.restarts,
         "ffmpeg_started": recorder.started_at.isoformat() if recorder.started_at else None,
         "preview_frames": frames.seq,
-        "serial": ptz is not None and ptz._ser is not None,
-        "current_file": current.name if current.exists() else None,
-        "current_size_gb": round(current.stat().st_size / 2**30, 2) if current.exists() else 0,
+        "serial": ptz is not None and ptz.connected,
+        "current_file": current.name if exists else None,
+        "current_size_gb": round(current.stat().st_size / 2**30, 2) if exists else 0,
         "free_gb": round(shutil.disk_usage(VIDEO_DIR).free / 2**30, 1),
         "retention_days": RETENTION_DAYS,
-    })
+    }
+
+
+@app.route("/health")
+def health():
+    return jsonify(current_state())
+
+
+# ---------------------------------------------------------------------------
+# MQTT bridge
+# ---------------------------------------------------------------------------
+class MqttBridge:
+    """Publishes camera state and accepts PTZ commands over MQTT.
+
+    Strictly optional. If the broker is unreachable the camera carries on
+    exactly as before; paho reconnects in the background on its own.
+
+    Topics, all under MQTT_PREFIX:
+        <prefix>/status      online | offline   (retained, offline via LWT)
+        <prefix>/state       JSON health snapshot (retained)
+        <prefix>/ptz/set     subscribed: {"action": "pan_left"} or "pan_left"
+        <prefix>/ptz/result  outcome of the last command
+    """
+
+    def __init__(self, stop: threading.Event) -> None:
+        self._stop = stop
+        self._client: mqtt.Client | None = None
+
+    def start(self) -> None:
+        if not MQTT_ENABLED:
+            log.info("MQTT bridge off - no credentials in the environment")
+            return
+        client = mqtt.Client(
+            mqtt.CallbackAPIVersion.VERSION2, client_id=f"{MQTT_PREFIX}-service"
+        )
+        client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
+        # The broker publishes this for us if we drop off without saying goodbye.
+        client.will_set(f"{MQTT_PREFIX}/status", "offline", qos=1, retain=True)
+        client.on_connect = self._on_connect
+        client.on_disconnect = self._on_disconnect
+        client.on_message = self._on_message
+        client.reconnect_delay_set(min_delay=1, max_delay=60)
+        self._client = client
+        try:
+            client.connect_async(MQTT_HOST, MQTT_PORT, keepalive=30)
+            client.loop_start()
+        except Exception:
+            log.exception("MQTT bridge failed to start")
+            self._client = None
+            return
+        log.info("MQTT bridge connecting to %s:%d as '%s', prefix '%s'",
+                 MQTT_HOST, MQTT_PORT, MQTT_USERNAME, MQTT_PREFIX)
+        threading.Thread(target=self._state_loop, name="mqtt-state",
+                         daemon=True).start()
+
+    def _on_connect(self, client, userdata, flags, reason_code, properties=None):
+        if reason_code != 0:
+            log.error("MQTT connection refused: %s", reason_code)
+            return
+        log.info("MQTT connected")
+        client.publish(f"{MQTT_PREFIX}/status", "online", qos=1, retain=True)
+        client.subscribe(f"{MQTT_PREFIX}/ptz/set", qos=1)
+        self._publish_state()
+
+    def _on_disconnect(self, client, userdata, flags, reason_code, properties=None):
+        if not self._stop.is_set():
+            log.warning("MQTT disconnected (%s) - retrying", reason_code)
+
+    def _on_message(self, client, userdata, msg):
+        try:
+            raw = msg.payload.decode("utf-8", "replace").strip()
+            if raw.startswith("{"):
+                payload = json.loads(raw)
+                action = str(payload.get("action", ""))
+                preset = payload.get("preset")
+                preset = int(preset) if preset is not None else None
+            else:
+                action, preset = raw, None      # bare action string also works
+            ok, err = execute_ptz(action, preset)
+            if not ok:
+                log.warning("MQTT PTZ '%s' rejected: %s",
+                            action, err or "serial write failed")
+            client.publish(
+                f"{MQTT_PREFIX}/ptz/result",
+                json.dumps({"action": action, "ok": ok, "error": err}), qos=0
+            )
+        except Exception:
+            log.exception("Unusable MQTT message on %s", msg.topic)
+
+    def _state_loop(self) -> None:
+        while not self._stop.wait(MQTT_STATE_INTERVAL):
+            self._publish_state()
+
+    def _publish_state(self) -> None:
+        if self._client is None:
+            return
+        try:
+            self._client.publish(f"{MQTT_PREFIX}/state",
+                                 json.dumps(current_state()), qos=0, retain=True)
+        except Exception:
+            log.exception("Could not publish MQTT state")
+
+    def stop_bridge(self) -> None:
+        if self._client is None:
+            return
+        try:
+            # Say goodbye properly so the retained status is accurate.
+            self._client.publish(f"{MQTT_PREFIX}/status", "offline",
+                                 qos=1, retain=True).wait_for_publish(timeout=2)
+            self._client.loop_stop()
+            self._client.disconnect()
+            log.info("MQTT bridge stopped")
+        except Exception:
+            pass
+
+
+mqtt_bridge = MqttBridge(shutdown)
 
 
 # ---------------------------------------------------------------------------
@@ -609,6 +794,7 @@ def graceful_stop() -> None:
         return
     shutdown.set()
     log.info("Shutting down")
+    mqtt_bridge.stop_bridge()
     recorder.stop()
     if ptz:
         ptz.close()
@@ -642,6 +828,7 @@ def main() -> None:
     threading.Thread(target=recorder.run, name="recorder", daemon=True).start()
     threading.Thread(target=retention_loop, args=(shutdown,),
                      name="retention", daemon=True).start()
+    mqtt_bridge.start()
 
     log.info("Serving on http://%s:%d", LISTEN_HOST, LISTEN_PORT)
     app.run(host=LISTEN_HOST, port=LISTEN_PORT,

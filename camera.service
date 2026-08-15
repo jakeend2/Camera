@@ -13,6 +13,10 @@ User=pi
 Group=pi
 SupplementaryGroups=video dialout plugdev
 WorkingDirectory=/home/pi/Desktop/Camera
+# MQTT credentials live here, outside the repo, so they are never committed.
+# The leading '-' means a missing file is not an error - the service simply
+# starts with the MQTT bridge disabled.
+EnvironmentFile=-/etc/camera-service.env
 ExecStart=/home/pi/Desktop/Camera/venv/bin/python /home/pi/Desktop/Camera/camera_service.py
 
 Restart=always
