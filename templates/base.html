@@ -69,11 +69,22 @@
     <script>
       // Local wall-clock time, formatted to match the timestamp burned into
       // the recordings so the two can be read against each other.
+      // Date and time are separate elements so the date can be dropped on a
+      // narrow screen without touching the layout. The full header - LCARS
+      // block, title and a 19-character timestamp - needs 387px, more than a
+      // 390px phone has, and the excess was being clipped by the overflow rule.
+      const clockEl = document.getElementById('clock');
+      clockEl.innerHTML =
+        '<span class="clock-date"></span><span class="clock-time"></span>';
+      const clockDate = clockEl.querySelector('.clock-date');
+      const clockTime = clockEl.querySelector('.clock-time');
+
       function updateClock() {
         const now = new Date();
         const pad = n => String(n).padStart(2, '0');
-        document.getElementById('clock').textContent =
-          `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ` +
+        clockDate.textContent =
+          `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} `;
+        clockTime.textContent =
           `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
       }
 

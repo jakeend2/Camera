@@ -959,3 +959,32 @@ body {
   filter: brightness(0.8);
   transform: translateY(1px);
 }
+
+/* Header fit on narrow screens.
+   The full header needs about 387px - LCARS block 80, separator 20, title
+   129, a 19-character timestamp 118, plus 40 of padding. A 390px phone has
+   370 available and a 375px one has 355, so the excess was silently clipped
+   by body{overflow-x:hidden}. Drop the date, tighten the padding, and let the
+   title ellipsis rather than push its neighbours out of the viewport. */
+@media (max-width: 480px) {
+  #clock .clock-date {
+    display: none;
+  }
+
+  .lcars-header-secondary {
+    padding: 0 10px;
+    min-width: 0;
+  }
+
+  .lcars-title {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  #clock {
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+}
