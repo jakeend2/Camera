@@ -101,6 +101,13 @@ class pelcoD():
         command = bytearray(b'\xFF\x01\x00\x00\x00\x00')
         command = pelcoD.checksum(command)
         return command
+
+    def panspeed(delta):
+        # speed on a gradient from 0 - 63     63 is max
+        # maximum delta is 320
+        percent = delta/320
+        speed = round(percent * 62)
+        return speed
     
     
 
