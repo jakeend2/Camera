@@ -23,6 +23,7 @@ import os
 import re
 import shutil
 import signal
+import ssl
 import subprocess
 import threading
 import time
@@ -81,6 +82,14 @@ PTZ_SPEED = 25               # Pelco-D pan/tilt speed, 0-63
 
 LISTEN_HOST = "0.0.0.0"
 LISTEN_PORT = 5000
+SERVER_THREADS = 16          # concurrent requests; MJPEG viewers hold one each
+
+# TLS. Self-signed and local-only by design - the certificate carries the Pi's
+# hostnames and LAN address as SANs. Missing files degrade to plain HTTP with a
+# loud warning rather than refusing to start, so a cert problem never costs you
+# the recording.
+TLS_CERT = os.environ.get("TLS_CERT", "/etc/camera-tls/server.crt")
+TLS_KEY = os.environ.get("TLS_KEY", "/etc/camera-tls/server.key")
 
 # MQTT. Credentials arrive from /etc/camera-service.env through systemd's
 # EnvironmentFile, deliberately outside the repo so they are never committed.
@@ -569,6 +578,7 @@ frames = FrameBuffer()
 recorder = Recorder(frames)
 ptz: PTZ | None = None
 shutdown = threading.Event()
+http_server = None
 
 
 @app.route("/")
@@ -789,11 +799,46 @@ mqtt_bridge = MqttBridge(shutdown)
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+def serve() -> None:
+    """Serve the app over TLS. Blocks until the server stops."""
+    global http_server
+
+    from cheroot.wsgi import Server as WSGIServer
+
+    server = WSGIServer((LISTEN_HOST, LISTEN_PORT), app,
+                        numthreads=SERVER_THREADS, server_name="camera")
+    have_cert = Path(TLS_CERT).exists() and Path(TLS_KEY).exists()
+    if have_cert:
+        from cheroot.ssl.builtin import BuiltinSSLAdapter
+
+        adapter = BuiltinSSLAdapter(TLS_CERT, TLS_KEY)
+        adapter.context.minimum_version = ssl.TLSVersion.TLSv1_2
+        server.ssl_adapter = adapter
+        log.info("Serving on https://%s:%d (TLS 1.2+)", LISTEN_HOST, LISTEN_PORT)
+    else:
+        log.warning("No certificate at %s - falling back to plain HTTP", TLS_CERT)
+        log.info("Serving on http://%s:%d", LISTEN_HOST, LISTEN_PORT)
+
+    http_server = server
+    try:
+        server.start()
+    finally:
+        try:
+            server.stop()
+        except Exception:
+            pass
+
+
 def graceful_stop() -> None:
     if shutdown.is_set():
         return
     shutdown.set()
     log.info("Shutting down")
+    if http_server is not None:
+        try:
+            http_server.stop()
+        except Exception:
+            pass
     mqtt_bridge.stop_bridge()
     recorder.stop()
     if ptz:
@@ -830,9 +875,7 @@ def main() -> None:
                      name="retention", daemon=True).start()
     mqtt_bridge.start()
 
-    log.info("Serving on http://%s:%d", LISTEN_HOST, LISTEN_PORT)
-    app.run(host=LISTEN_HOST, port=LISTEN_PORT,
-            debug=False, threaded=True, use_reloader=False)
+    serve()
 
 
 if __name__ == "__main__":

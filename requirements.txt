@@ -8,3 +8,4 @@
 flask>=3.0
 pyserial>=3.5
 paho-mqtt>=2.0
+cheroot>=10.0

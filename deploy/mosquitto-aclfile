@@ -1,0 +1,25 @@
+# Per-client topic permissions.
+#
+# With an acl_file configured, an authenticated user gets NO access unless
+# something below grants it. Each device is confined to its own prefix so a
+# compromised client cannot drive the others - a garage door opener has no
+# business publishing camera commands.
+
+# --- camera service -------------------------------------------------------
+# Owns everything under camera/. It also serves the dashboard today, so it
+# needs to see the other devices and issue commands to them - but only on
+# their /set topics, never their state.
+user camera
+topic readwrite camera/#
+topic read garage/#
+topic write garage/+/set
+topic read hvac/#
+topic write hvac/+/set
+
+# --- ratgdo garage controller (user created when the hardware arrives) ----
+user ratgdo
+topic readwrite garage/#
+
+# --- Z-Wave JS gateway (user created when the dongle arrives) -------------
+user zwave
+topic readwrite hvac/#
