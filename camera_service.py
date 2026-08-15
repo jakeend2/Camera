@@ -649,6 +649,23 @@ app.config.update(
     PERMANENT_SESSION_LIFETIME=timedelta(hours=SESSION_HOURS),
 )
 
+# Static assets get a long cache with a version stamp from their mtime, so a
+# changed stylesheet reaches a phone immediately instead of after the browser
+# decides to revalidate. The pages themselves are never cached: the PTZ
+# JavaScript is inline, so a stale page means stale controls.
+app.config["SEND_FILE_MAX_AGE_DEFAULT"] = timedelta(days=30)
+
+
+@app.url_defaults
+def _stamp_static(endpoint, values):
+    if endpoint == "static" and "filename" in values:
+        try:
+            stamp = (Path(app.static_folder) / values["filename"]).stat().st_mtime
+        except OSError:
+            return
+        values["v"] = int(stamp)
+
+
 login_manager = LoginManager(app)
 login_manager.login_view = "login"
 login_manager.session_protection = "strong"
@@ -709,6 +726,8 @@ def security_headers(response):
     <style> and <script> blocks. Everything else is 'self' now that Bootstrap,
     jQuery and the font are served locally.
     """
+    if not request.path.startswith("/static/"):
+        response.headers.setdefault("Cache-Control", "no-store")
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "no-referrer")

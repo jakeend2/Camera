@@ -939,3 +939,23 @@ body {
   flex-shrink: 0;
   font-size: 0.7rem;
 }
+/* Touch behaviour for the control buttons.
+   Without these, a long press on a phone selects the button's label or opens
+   the iOS callout menu instead of holding the button down - which is what a
+   press-and-hold PTZ control needs to do. touch-action: manipulation also
+   drops the 300ms double-tap-zoom delay. */
+.lcars-control-grid button,
+.lcars-media-button {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+
+/* Visible feedback while a direction is held, since :active is unreliable
+   once the pointer is captured. */
+.lcars-control-grid button.is-held {
+  filter: brightness(0.8);
+  transform: translateY(1px);
+}

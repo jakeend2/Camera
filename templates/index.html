@@ -22,23 +22,23 @@
   <!-- Direction Controls - Modern LCARS Grid Style -->
   <div class="lcars-control-grid">
     <!-- Control buttons - arranged in a grid -->
-    <button class="thermal" onmousedown="Thermal_Camera();">THERMAL</button>
-    <button class="focus-near" onmousedown="focus_near();">FOCUS-</button>
-    <button class="up" onmousedown="tilt_up();" onmouseup="stop();">▲</button>
-    <button class="focus-far" onmousedown="focus_far();">FOCUS+</button>
-    <button class="wiper" onmousedown="Windshield_Wiper();">WIPER</button>
+    <button class="thermal" onclick="Thermal_Camera();">THERMAL</button>
+    <button class="focus-near" data-hold="focus_near">FOCUS-</button>
+    <button class="up" data-hold="tilt_up">▲</button>
+    <button class="focus-far" data-hold="focus_far">FOCUS+</button>
+    <button class="wiper" onclick="Windshield_Wiper();">WIPER</button>
     
-    <button class="visible" onmousedown="Visible_Light_Camera();">VISIBLE</button>
-    <button class="left" onmousedown="pan_left();" onmouseup="stop();">◀</button>
-    <button class="home" onmousedown="stop();">●</button>
-    <button class="right" onmousedown="pan_right();" onmouseup="stop();">▶</button>
-    <button class="osd" onmousedown="OSD_menu();">OSD</button>
+    <button class="visible" onclick="Visible_Light_Camera();">VISIBLE</button>
+    <button class="left" data-hold="pan_left">◀</button>
+    <button class="home" onclick="stop();">●</button>
+    <button class="right" data-hold="pan_right">▶</button>
+    <button class="osd" onclick="OSD_menu();">OSD</button>
     
-    <button class="preset1" onmousedown="Tour_1();">TOUR 1</button>
-    <button class="zoom-out" onmousedown="zoom_wide();" onmouseup="stop();">ZOOM-</button>
-    <button class="down" onmousedown="tilt_down();" onmouseup="stop();">▼</button>
-    <button class="zoom-in" onmousedown="zoom_tele();" onmouseup="stop();">ZOOM+</button>
-    <button class="preset2" onmousedown="Tour_2();">TOUR 2</button>
+    <button class="preset1" onclick="Tour_1();">TOUR 1</button>
+    <button class="zoom-out" data-hold="zoom_wide">ZOOM-</button>
+    <button class="down" data-hold="tilt_down">▼</button>
+    <button class="zoom-in" data-hold="zoom_tele">ZOOM+</button>
+    <button class="preset2" onclick="Tour_2();">TOUR 2</button>
   </div>
   
   <!-- Media Control Bar -->
@@ -271,5 +271,61 @@
       headers: new Headers({ "content-type": "application/json" })
     })
   }
+    // --- press and hold -------------------------------------------------
+    // Pointer events, not mouse events. A phone does not deliver mousedown
+    // while a finger is still down - it synthesises one after the gesture
+    // ends, if at all - so the old handlers never started the movement, and
+    // the long press fell through to text selection instead.
+    const HOLD_ENDPOINTS = {
+      pan_left: '/pan_left',     pan_right: '/pan_right',
+      tilt_up: '/tilt_up',       tilt_down: '/tilt_down',
+      zoom_tele: '/zoom_tele',   zoom_wide: '/zoom_wide',
+      focus_near: '/focus_near', focus_far: '/focus_far'
+    };
+
+    function postCmd(path) {
+      return fetch(path, {
+        method: "POST",
+        credentials: "include",
+        body: JSON.stringify({}),
+        headers: new Headers({ "content-type": "application/json" })
+      });
+    }
+
+    let holding = null;
+
+    function beginHold(btn, ev) {
+      ev.preventDefault();          // suppress selection and the iOS callout
+      if (holding) return;
+      holding = btn;
+      btn.classList.add('is-held');
+      try { btn.setPointerCapture(ev.pointerId); } catch (e) {}
+      postCmd(HOLD_ENDPOINTS[btn.dataset.hold]);
+    }
+
+    function endHold() {
+      if (!holding) return;
+      holding.classList.remove('is-held');
+      holding = null;
+      postCmd('/stop');
+    }
+
+    document.querySelectorAll('[data-hold]').forEach(function (btn) {
+      btn.addEventListener('pointerdown', function (ev) { beginHold(btn, ev); });
+      btn.addEventListener('pointerup', endHold);
+      btn.addEventListener('pointercancel', endHold);
+      btn.addEventListener('lostpointercapture', endHold);
+      btn.addEventListener('contextmenu', function (ev) { ev.preventDefault(); });
+    });
+
+    // If the finger slides off, or the page is backgrounded mid hold, the
+    // pointerup may never reach the element - and the camera would keep
+    // panning. Always stop.
+    window.addEventListener('pointerup', endHold);
+    window.addEventListener('blur', endHold);
+    document.addEventListener('visibilitychange', function () {
+      if (document.hidden) endHold();
+    });
+
 </script>
 {% endblock %}
