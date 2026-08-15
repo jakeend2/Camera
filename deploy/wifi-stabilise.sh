@@ -13,23 +13,36 @@
 #   in the 16 minutes before the interface wedged. Channels 52-144 are DFS in
 #   the US, so radar avoidance can force channel changes on top of that.
 #
+#   The kernel log also shows the AP driving it: repeated
+#     brcmf_p2p_send_action_frame: Unknown Frame: category 0xa, action 0x8
+#   at exactly each re-association. Category 0x0a action 0x08 is an 802.11v
+#   BSS Transition Management request - the gateway steering the client - and
+#   the Broadcom firmware answers "Unknown Frame". Power save was on too.
+#
 #   The failure mode: the interface stays associated and still receives router
 #   multicast, but stops carrying unicast traffic. Only a power cycle clears it.
 #
 # WHAT THIS DOES
 #   Pins the profile to 2.4 GHz - same SSID, 40 signal units stronger, off DFS
-#   entirely - and disables WiFi power save. 2.4 GHz is slower, which does not
-#   matter here: the preview stream is about 3.6 Mbps and the rest is SSH.
+#   entirely, and nowhere for the AP to steer it to - and disables WiFi power
+#   save. 2.4 GHz is slower, which does not matter here: the preview stream is
+#   about 3.6 Mbps and the rest is SSH.
 #
 # HOW IT PROVES ITSELF
 #   Applying the change drops the SSH session that launched this, so the work
-#   is written to a temporary script and detached with setsid. It must be a
-#   file, not a heredoc: `setsid bash <<EOF ... </dev/null` silently does
-#   nothing, because the /dev/null redirect replaces the heredoc on stdin.
+#   is written to a temporary script and handed to systemd-run.
 #
-#   The detached job then verifies connectivity FROM THE PI - gateway
-#   reachable and DNS resolving - and reverts on its own if either fails.
-#   Nothing to confirm, no timer to beat, no way to strand the machine.
+#   Two earlier mechanisms failed silently, which is why it is done this way.
+#   `setsid bash <<EOF ... </dev/null` runs nothing at all - the /dev/null
+#   redirect replaces the heredoc on stdin. And a backgrounded `setsid payload &`
+#   is killed the moment sudo returns, because this host has use_pty in its
+#   sudoers Defaults: sudo runs the command in a pty and tears that session
+#   down on exit, taking detached children with it. systemd-run hands the job
+#   to PID 1, outside all of that.
+#
+#   The job then verifies connectivity FROM THE PI - gateway reachable and DNS
+#   resolving - and reverts on its own if either fails. Nothing to confirm, no
+#   timer to beat, no way to strand the machine.
 #
 #   Outcome is recorded in the journal under the tag 'wifi-stabilise'.
 #
@@ -58,10 +71,15 @@ if [ "${1:-}" = "--status" ]; then
     exit 0
 fi
 
-[ "$(id -u)" -eq 0 ] || { echo "Run with sudo."; exit 1; }
+if [ "$(id -u)" -ne 0 ]; then
+    echo "Run with sudo."
+    exit 1
+fi
 
-nmcli -t -f NAME connection show | grep -qx "$PROFILE" \
-  || { echo "No NetworkManager profile named '$PROFILE'."; exit 1; }
+if ! nmcli -t -f NAME connection show | grep -qx "$PROFILE"; then
+    echo "No NetworkManager profile named '$PROFILE'."
+    exit 1
+fi
 
 if [ "${1:-}" = "--revert" ]; then
     echo "Reverting to automatic band selection and default power save."
@@ -73,16 +91,16 @@ if [ "${1:-}" = "--revert" ]; then
 fi
 
 GATEWAY="$(ip route show default | awk '/default/{print $3; exit}')"
-[ -n "$GATEWAY" ] || { echo "No default gateway found; refusing to change WiFi."; exit 1; }
+if [ -z "$GATEWAY" ]; then
+    echo "No default gateway found; refusing to change WiFi."
+    exit 1
+fi
 
 echo "== before =="
 nmcli -f 802-11-wireless.band,802-11-wireless.powersave connection show "$PROFILE" | sed 's/^/   /'
 nmcli -f ACTIVE,SSID,BSSID,CHAN,FREQ,SIGNAL device wifi list | grep '^yes' | sed 's/^/   /' || true
 echo "   gateway: $GATEWAY"
 
-# The payload has to be a real file. Feeding it to `setsid bash` on stdin and
-# also redirecting stdin from /dev/null means bash reads nothing and exits
-# without running a line of it - which is exactly what happened the first time.
 PAYLOAD="$(mktemp /run/wifi-stabilise.XXXXXX)"
 chmod 700 "$PAYLOAD"
 
@@ -94,17 +112,13 @@ TAG='${TAG}'
 
 logger -t "\$TAG" "applying: band=bg (2.4GHz), powersave=disabled"
 
-# band=bg restricts to 2.4 GHz without pinning one BSSID, so the radio can
-# still move between 2.4 GHz APs. powersave=2 is 'disabled'; 0 means 'use the
-# default', which is not the same thing.
 nmcli connection modify "\$PROFILE" 802-11-wireless.band bg 802-11-wireless.powersave 2
 nmcli connection up "\$PROFILE" >/dev/null 2>&1
 
 ok=0
 for i in \$(seq 1 15); do
     sleep 4
-    if ping -c1 -W2 "\$GATEWAY" >/dev/null 2>&1 \\
-       && getent hosts deb.debian.org >/dev/null 2>&1; then
+    if ping -c1 -W2 "\$GATEWAY" >/dev/null 2>&1 && getent hosts deb.debian.org >/dev/null 2>&1; then
         ok=1
         break
     fi
@@ -123,21 +137,21 @@ fi
 rm -f "\$0"
 EOF
 
-setsid "$PAYLOAD" </dev/null >/dev/null 2>&1 &
-disown 2>/dev/null || true
+# systemd-run, not a background job: sudo's use_pty kills detached children
+# as soon as this script returns.
+systemctl reset-failed wifi-stabilise-apply.service 2>/dev/null || true
+systemd-run --collect --unit=wifi-stabilise-apply --description="Apply and verify 2.4 GHz WiFi settings" "$PAYLOAD" >/dev/null
 
 cat <<EOF
 
 Applying now. Your SSH session will drop for a few seconds - that is expected.
 
 The Pi verifies the new settings itself: gateway reachable and DNS resolving,
-retried for up to 60 seconds. It reverts on its own if either fails. There is
-nothing you need to type in time.
+retried for up to 60 seconds. It reverts on its own if either fails.
 
 Wait about 90 seconds, then:
 
     ssh pi@192.168.1.125 "/opt/camera/deploy/wifi-stabilise.sh --status"
 
-Look for a line containing VERIFIED. If it reverted instead, the log says so
-and nothing is left half-applied.
+Look for a line containing VERIFIED.
 EOF
