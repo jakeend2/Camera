@@ -28,9 +28,15 @@
 
 <style>
   .lcars-login-wrap {
+    /* base.html's .lcars-layout is a CSS grid whose columns are 0 1fr 0.
+       Without claiming the 'main' area this lands in the zero-width left
+       column and vanishes. */
+    grid-area: main;
     display: flex;
+    align-items: flex-start;
     justify-content: center;
     padding: 2rem 1rem;
+    width: 100%;
   }
   .lcars-login-panel {
     display: flex;
