@@ -139,8 +139,14 @@ EOF
 
 # systemd-run, not a background job: sudo's use_pty kills detached children
 # as soon as this script returns.
+#
+# Invoked as `/bin/bash <payload>` rather than executing the payload directly,
+# because /run is mounted noexec. The file has mode 700 and is owned by root,
+# but the mount forbids execve() regardless - systemd reported 203/EXEC,
+# "Failed to locate executable ... Permission denied". Passing it as an
+# argument to bash is an ordinary open() and is unaffected.
 systemctl reset-failed wifi-stabilise-apply.service 2>/dev/null || true
-systemd-run --collect --unit=wifi-stabilise-apply --description="Apply and verify 2.4 GHz WiFi settings" "$PAYLOAD" >/dev/null
+systemd-run --collect --unit=wifi-stabilise-apply --description="Apply and verify 2.4 GHz WiFi settings" /bin/bash "$PAYLOAD" >/dev/null
 
 cat <<EOF
 
