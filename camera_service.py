@@ -68,7 +68,12 @@ LOG_DIR = BASE_DIR / "logs"
 RETENTION_DAYS = 14
 MIN_FREE_GB = 50             # hard floor; oldest whole days go first
 
-SERIAL_PORT = "/dev/ttyUSB0"
+# Addressed by the adapter's own serial number, not by enumeration order.
+# /dev/ttyUSB0 is first-come-first-served: plug in any other USB serial device
+# (most Z-Wave sticks use CP210x chips and claim ttyUSB too) and a reboot can
+# hand that name to the wrong device, silently sending Pelco-D into the radio.
+SERIAL_PORT = "/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_AM00KHR1-if00-port0"
+SERIAL_PORT_FALLBACK = "/dev/ttyUSB0"
 SERIAL_BAUD = 9600
 
 LISTEN_HOST = "0.0.0.0"
@@ -421,12 +426,28 @@ class PTZ:
         self._open()
 
     def _open(self) -> None:
-        try:
-            self._ser = serial.Serial(self._port, self._baud, timeout=1)
-            log.info("Serial port %s open at %d baud", self._port, self._baud)
-        except Exception as exc:
-            self._ser = None
-            log.error("Serial port %s unavailable: %s", self._port, exc)
+        """Open the by-id path, falling back to the raw device node.
+
+        The fallback exists only so a replacement adapter (different serial
+        number) still works; it logs loudly because the wrong device could be
+        sitting on that name.
+        """
+        for port, is_fallback in ((self._port, False), (SERIAL_PORT_FALLBACK, True)):
+            if not port or not Path(port).exists():
+                continue
+            try:
+                self._ser = serial.Serial(port, self._baud, timeout=1)
+                if is_fallback:
+                    log.warning("Opened FALLBACK serial port %s - the by-id path "
+                                "%s was missing. Verify this is the PTZ adapter.",
+                                port, self._port)
+                else:
+                    log.info("Serial port %s open at %d baud", port, self._baud)
+                return
+            except Exception as exc:
+                log.error("Serial port %s unavailable: %s", port, exc)
+        self._ser = None
+        log.error("No usable serial port for PTZ control")
 
     def send(self, command: str, *args) -> bool:
         """Emit one Pelco-D command. Reopens the port if it has dropped."""
