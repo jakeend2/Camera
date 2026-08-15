@@ -1,0 +1,17 @@
+# 'pi' must supply a password for sudo. The blanket NOPASSWD that shipped with
+# the image meant anything running as pi - including, until recently, the
+# camera service - could become root silently.
+#
+# Narrow exception: starting and stopping the two services this box exists to
+# run. These are exact command paths with no wildcards, and systemctl offers
+# no shell escape, so they cannot be used to widen access.
+#
+# journalctl and 'systemctl status' are deliberately absent: pi is in the adm
+# group and can already read the journal without privileges, and journalctl's
+# pager can spawn a shell.
+pi ALL=(root) NOPASSWD: /usr/bin/systemctl start camera.service, \
+                        /usr/bin/systemctl stop camera.service, \
+                        /usr/bin/systemctl restart camera.service, \
+                        /usr/bin/systemctl start mosquitto.service, \
+                        /usr/bin/systemctl stop mosquitto.service, \
+                        /usr/bin/systemctl restart mosquitto.service
