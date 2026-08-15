@@ -1,0 +1,18 @@
+# Runtime output - never belongs in the repo
+videos/
+recordings/
+logs/
+*.ts
+*.avi
+*.mkv
+*.mp4
+*.log
+
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# Editor / IDE state
+.vs/
+.vscode/

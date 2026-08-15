@@ -1,0 +1,9 @@
+# Runtime dependencies for camera_service.py.
+#
+# The media pipeline runs in a system ffmpeg subprocess, so there is no
+# OpenCV / NumPy / Pillow dependency any more - Python never touches pixels.
+#
+# System packages also required:
+#   ffmpeg, fonts-dejavu-core
+flask>=3.0
+pyserial>=3.5
