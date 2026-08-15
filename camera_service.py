@@ -25,6 +25,7 @@ import shutil
 import signal
 import ssl
 import subprocess
+import tempfile
 import threading
 import time
 from datetime import date, datetime, timedelta
@@ -116,6 +117,28 @@ SERIAL_PORT = _env(
 SERIAL_PORT_FALLBACK = "/dev/ttyUSB0"
 SERIAL_BAUD = _env_int("SERIAL_BAUD", 9600)
 PTZ_SPEED = 25               # Pelco-D pan/tilt speed, 0-63
+
+# Archive playback and clipping. Both are remux-only - ffmpeg copies the
+# H.264 bitstream untouched, never re-encoding - so the cost is I/O, not CPU.
+# Measured on this Pi: a 60s clip out of a 1.2 GB file takes 0.8s, and the
+# first bytes of a playback stream arrive in 0.6s.
+# Playback is served in windows rather than as one endless stream. Each is a
+# complete, seekable MP4 - moov at the front, duration known - so the
+# browser's own scrubber works inside it and the page only has to fetch a new
+# one when you leave it. 120s keeps the file around 40 MB and about a second
+# to cut; longer windows scrub better but start slower.
+PLAY_WINDOW_SECONDS = _env_int("PLAY_WINDOW_SECONDS", 120)
+# Finished windows are kept so a scrub backwards, a replay, or the browser's
+# range requests cost nothing. Oldest go first once the cache is over budget.
+WINDOW_CACHE_MB = _env_int("WINDOW_CACHE_MB", 1024)
+CLIP_MAX_SECONDS = _env_int("CLIP_MAX_SECONDS", 1800)
+# Concurrent archive jobs. The live recording always wins: these run niced
+# and at idle I/O priority, and a request that cannot get a slot within
+# MEDIA_WAIT seconds is refused rather than queued behind a viewer.
+MEDIA_JOBS = _env_int("MEDIA_JOBS", 3)
+MEDIA_WAIT = 8
+CLIP_DIR = BASE_DIR / "clips"
+NICE = ["nice", "-n", "10", "ionice", "-c", "3"]
 
 LISTEN_HOST = "0.0.0.0"
 LISTEN_PORT = 5000
@@ -263,6 +286,224 @@ def day_of(path: Path):
         return datetime.strptime(m.group(1), "%Y-%m-%d").date()
     except ValueError:
         return None
+
+
+INDEX_FILE = LOG_DIR / "archive-index.json"
+
+
+class ArchiveIndex:
+    """Wall-clock map of the recordings on disk.
+
+    Each .ts file is one uninterrupted run of the recorder: a restart closes
+    the current file and opens a .partNN. Nothing inside a file stores
+    wall-clock time, so its span has to be derived from the filesystem.
+
+    The anchor is the file's BIRTH time - ext4 keeps it, `stat -c %W` reads
+    it, and a rename preserves it, so it survives the restart shuffle that
+    turns today's file into a .partNN. Checked against the timestamp burned
+    into the video at offset 0: part24 predicted 15:07:42 and read 15:07:42,
+    part19 predicted 13:17:08 and read 13:17:07.
+
+    mtime was tried first and is wrong: it is when the file was last touched,
+    which trails the last recorded frame by anything from 2s to 30s depending
+    on how that ffmpeg died. That is also why a segment's end is start +
+    duration and never mtime - claiming footage that was never written makes
+    playback seek into nothing.
+
+    Probing costs ~0.6s per file and a day can hold dozens, so results are
+    cached by (size, mtime) and persisted: a finished file is probed once
+    ever, even across service restarts. Only the growing file is re-probed.
+    """
+
+    TTL = 5.0            # seconds before a refresh re-examines the directory
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._probe_cache: dict[str, tuple] = {}
+        self._segments: list[dict] = []
+        self._checked = 0.0
+        self._load()
+
+    # -- persistence --------------------------------------------------------
+    def _load(self) -> None:
+        try:
+            raw = json.loads(INDEX_FILE.read_text())
+            self._probe_cache = {k: tuple(v) for k, v in raw.items()}
+            log.info("Archive index: %d cached probes", len(self._probe_cache))
+        except FileNotFoundError:
+            pass
+        except Exception:
+            log.warning("Archive index cache unreadable - rebuilding")
+
+    def _save(self) -> None:
+        try:
+            INDEX_FILE.parent.mkdir(parents=True, exist_ok=True)
+            tmp = INDEX_FILE.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self._probe_cache))
+            tmp.replace(INDEX_FILE)
+        except Exception:
+            log.warning("Could not persist the archive index", exc_info=True)
+
+    # -- probing ------------------------------------------------------------
+    @staticmethod
+    def _birth_times(paths: list) -> dict:
+        """Birth time per file, in one stat(1) call rather than one each.
+
+        Returns {name: epoch}, omitting anything the filesystem cannot
+        answer for - callers fall back to mtime minus duration there.
+        """
+        if not paths:
+            return {}
+        try:
+            out = subprocess.run(
+                ["stat", "-c", "%W|%n"] + [str(p) for p in paths],
+                stdin=subprocess.DEVNULL, capture_output=True, timeout=30,
+            )
+            found = {}
+            for line in out.stdout.decode("utf-8", "replace").splitlines():
+                birth, _, name = line.partition("|")
+                try:
+                    epoch = int(birth)
+                except ValueError:
+                    continue
+                if epoch > 0:
+                    found[Path(name).name] = epoch
+            return found
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _probe(path: Path):
+        try:
+            out = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "csv=p=0", str(path)],
+                stdin=subprocess.DEVNULL, capture_output=True, timeout=30,
+            )
+            return float(out.stdout.decode().strip())
+        except Exception:
+            return None
+
+    def refresh(self, force: bool = False) -> None:
+        now = time.monotonic()
+        with self._lock:
+            if not force and now - self._checked < self.TTL:
+                return
+            self._checked = now
+            paths = sorted(VIDEO_DIR.glob("*." + RECORD_EXT))
+            births = self._birth_times(paths)
+            if paths and not births:
+                log.warning("No birth times available - archive times will be "
+                            "less accurate on this filesystem")
+            segments, dirty = [], False
+            for path in paths:
+                day = day_of(path)
+                if day is None:
+                    continue
+                try:
+                    st = path.stat()
+                except OSError:
+                    continue
+                if st.st_size == 0:
+                    continue
+                hit = self._probe_cache.get(path.name)
+                # Re-probe whenever the file has changed at all - which is
+                # exactly the file still being written to.
+                if not hit or hit[0] != st.st_size or hit[1] != int(st.st_mtime):
+                    duration = self._probe(path)
+                    if duration is None or duration <= 0:
+                        continue
+                    self._probe_cache[path.name] = (st.st_size,
+                                                    int(st.st_mtime), duration)
+                    dirty = True
+                else:
+                    duration = hit[2]
+                # Birth time is when the recorder opened this file, which is
+                # the first frame in it. mtime is only where it stopped being
+                # touched, and can trail the last frame by half a minute.
+                start = births.get(path.name)
+                if start is None:
+                    start = st.st_mtime - duration
+                segments.append({
+                    "name": path.name,
+                    "day": day.isoformat(),
+                    "start": float(start),
+                    "end": float(start) + duration,
+                    "duration": duration,
+                    "size": st.st_size,
+                })
+            segments.sort(key=lambda s: s["start"])
+            # A file's birth time is a fact; its duration is ffmpeg's
+            # estimate, and one file in thirty-odd over-reports by a few
+            # seconds - enough to run past the moment the next recording
+            # actually began. Trust the birth time and trim the estimate, so
+            # no instant is ever claimed by two files and the timeline stays
+            # strictly ordered.
+            for earlier, later in zip(segments, segments[1:]):
+                if earlier["end"] > later["start"]:
+                    earlier["end"] = later["start"]
+                    earlier["duration"] = max(
+                        0.0, earlier["end"] - earlier["start"])
+            segments = [s for s in segments if s["duration"] > 0.5]
+            self._segments = segments
+            if dirty:
+                # Forget files retention has since deleted.
+                live = {s["name"] for s in segments}
+                self._probe_cache = {k: v for k, v in self._probe_cache.items()
+                                     if k in live}
+                self._save()
+
+    # -- queries ------------------------------------------------------------
+    def days(self) -> list[str]:
+        self.refresh()
+        return sorted({s["day"] for s in self._segments}, reverse=True)
+
+    def segments(self, day: date) -> list[dict]:
+        self.refresh()
+        key = day.isoformat()
+        return [s for s in self._segments if s["day"] == key]
+
+    def locate(self, day: date, offset: float):
+        """Map seconds-past-midnight to (segment, offset into that file).
+
+        None when the moment falls in a gap - the recorder was down then.
+        """
+        target = self.midnight(day) + offset
+        for seg in self.segments(day):
+            if seg["start"] <= target < seg["end"]:
+                return seg, target - seg["start"]
+        return None
+
+    def next_after(self, day: date, offset: float):
+        """Seconds-past-midnight of the next available footage, or None."""
+        target = self.midnight(day) + offset
+        starts = [s["start"] for s in self.segments(day) if s["start"] > target]
+        return min(starts) - self.midnight(day) if starts else None
+
+    def overlapping(self, day: date, start: float, end: float) -> list[dict]:
+        """Every segment touching [start, end], with the cut needed from each.
+
+        Each entry says where to seek into that file and how much to take, so
+        the caller can make one fast seek per file instead of asking ffmpeg to
+        seek through a concatenation - measured at 2.3s versus 28.8s.
+        """
+        t0 = self.midnight(day) + start
+        t1 = self.midnight(day) + end
+        cuts = []
+        for seg in self.segments(day):
+            lo, hi = max(t0, seg["start"]), min(t1, seg["end"])
+            if hi - lo <= 0.05:
+                continue
+            cuts.append({"name": seg["name"], "seek": lo - seg["start"],
+                         "take": hi - lo, "start": lo, "end": hi})
+        return cuts
+
+    @staticmethod
+    def midnight(day: date) -> float:
+        return datetime.combine(day, datetime.min.time()).timestamp()
+
+
+archive = ArchiveIndex()
 
 
 class Recorder:
@@ -824,7 +1065,10 @@ def require_login():
     if current_user.is_authenticated:
         return None
     # Anything scripted gets a clean 401; a browser navigation gets the form.
-    if request.method == "POST" or request.path in ("/camera", "/health"):
+    scripted = request.path.startswith(("/timeline", "/play", "/clip"))
+    if (request.method == "POST"
+            or request.path in ("/camera", "/health", "/snapshot")
+            or scripted):
         return make_response(
             jsonify({"ok": False, "error": "authentication required"}), 401
         )
@@ -1017,6 +1261,334 @@ def recording_file(name: str):
         return make_response(jsonify({"ok": False, "error": "no such recording"}), 404)
     return send_from_directory(VIDEO_DIR, name, as_attachment=True,
                                conditional=True)
+
+
+# ---------------------------------------------------------------------------
+# Archive playback and clipping
+#
+# Both paths are remux-only: ffmpeg copies the H.264 bitstream and rewrites
+# only the container, so nothing is ever re-encoded and the picture is bit
+# identical to what was recorded. Playback streams a fragmented MP4 straight
+# to a plain <video> element, which means no media-source library to vendor
+# and no MSE dependency - it plays anywhere, including browsers that have no
+# Media Source Extensions at all.
+# ---------------------------------------------------------------------------
+_media_slots = threading.Semaphore(MEDIA_JOBS)
+
+
+class MediaBusy(Exception):
+    """Every archive worker slot is taken."""
+
+
+def _take_slot():
+    if not _media_slots.acquire(timeout=MEDIA_WAIT):
+        raise MediaBusy()
+
+
+def _parse_day(raw: str):
+    try:
+        return datetime.strptime(raw, "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return None
+
+
+def _float_arg(name: str, default: float) -> float:
+    try:
+        return float(request.args.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _run_media(args: list, timeout: int = 600):
+    """Run a niced ffmpeg to completion. Returns (ok, stderr)."""
+    try:
+        done = subprocess.run(
+            NICE + args, stdin=subprocess.DEVNULL,
+            capture_output=True, timeout=timeout,
+        )
+        return done.returncode == 0, done.stderr.decode("utf-8", "replace")
+    except subprocess.TimeoutExpired:
+        return False, "ffmpeg timed out"
+    except Exception as exc:
+        return False, str(exc)
+
+
+@app.route("/timeline")
+def timeline():
+    """What footage exists for a day, and where the holes are.
+
+    Gaps are real: every service restart ends one file and starts another,
+    and whatever happened in between was not recorded. The UI draws them
+    rather than papering over them.
+    """
+    day = _parse_day(request.args.get("day", ""))
+    if day is None:
+        return make_response(jsonify({"ok": False, "error": "bad day"}), 400)
+
+    midnight = ArchiveIndex.midnight(day)
+    segs = archive.segments(day)
+    out, gaps, previous = [], [], None
+    for seg in segs:
+        begin = seg["start"] - midnight
+        finish = seg["end"] - midnight
+        if previous is not None and begin - previous > 1.0:
+            gaps.append({"from": round(previous, 1), "to": round(begin, 1)})
+        previous = finish
+        out.append({
+            "name": seg["name"],
+            "from": round(begin, 1),
+            "to": round(finish, 1),
+            "size_gb": round(seg["size"] / 2**30, 2),
+        })
+    return jsonify({
+        "ok": True,
+        "day": day.isoformat(),
+        "days": archive.days(),
+        "segments": out,
+        "gaps": gaps,
+        "covered_seconds": round(sum(s["duration"] for s in segs)),
+        "clip_max": CLIP_MAX_SECONDS,
+        "window": PLAY_WINDOW_SECONDS,
+    })
+
+
+@app.route("/watch")
+@app.route("/watch/<day>")
+def watch(day: str = ""):
+    parsed = _parse_day(day) if day else None
+    if parsed is None:
+        days = archive.days()
+        parsed = _parse_day(days[0]) if days else date.today()
+    return render_template("watch.html", day=parsed.isoformat())
+
+
+WINDOW_DIR = CLIP_DIR / "windows"
+
+
+def _sweep_windows() -> None:
+    """Hold the window cache under budget, dropping least-recently-used."""
+    try:
+        files = [(f.stat().st_atime, f.stat().st_size, f)
+                 for f in WINDOW_DIR.glob("*.mp4")]
+    except OSError:
+        return
+    total = sum(size for _, size, _ in files)
+    budget = WINDOW_CACHE_MB * 2**20
+    for _, size, path in sorted(files):
+        if total <= budget:
+            break
+        try:
+            path.unlink()
+            total -= size
+        except OSError:
+            pass
+
+
+def _build_window(seg: dict, into: float, length: float, key: str):
+    """Cut one playback window, reusing the cached copy when there is one."""
+    WINDOW_DIR.mkdir(parents=True, exist_ok=True)
+    final = WINDOW_DIR / key
+    if final.exists() and final.stat().st_size > 0:
+        return final, None
+
+    # Built under a unique name and renamed into place, so two viewers asking
+    # for the same window cannot serve each other a half-written file.
+    scratch = WINDOW_DIR / f".{key}.{os.getpid()}.{threading.get_ident()}"
+    ok, err = _run_media([
+        "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
+        "-ss", f"{into:.3f}", "-t", f"{length:.3f}",
+        "-i", str(VIDEO_DIR / seg["name"]),
+        "-c", "copy", "-an", "-movflags", "+faststart",
+        "-f", "mp4", "-y", str(scratch),
+    ], timeout=180)
+    if not ok or not scratch.exists() or scratch.stat().st_size == 0:
+        scratch.unlink(missing_ok=True)
+        return None, err or "ffmpeg produced nothing"
+    scratch.replace(final)
+    _sweep_windows()
+    return final, None
+
+
+@app.route("/play")
+def play():
+    """Serve a bounded window of archive footage as a seekable MP4.
+
+    A fragmented stream was tried first and is worse: with no moov duration
+    the browser reports a 299s window as 6s, its scrubber does not work, and
+    nothing can seek inside what it already has. A complete MP4 costs about a
+    second to cut and is then fully seekable, cached, and range-serveable.
+
+    Playback that runs past the end of a segment stops there; the page picks
+    up the next one.
+    """
+    day = _parse_day(request.args.get("day", ""))
+    if day is None:
+        return make_response(jsonify({"ok": False, "error": "bad day"}), 400)
+
+    offset = max(0.0, _float_arg("t", 0.0))
+    hit = archive.locate(day, offset)
+    if hit is None:
+        nxt = archive.next_after(day, offset)
+        return make_response(jsonify({
+            "ok": False, "error": "no recording at that time",
+            "next": round(nxt, 1) if nxt is not None else None,
+        }), 404)
+
+    seg, into = hit
+    window = min(_float_arg("d", PLAY_WINDOW_SECONDS), PLAY_WINDOW_SECONDS)
+    window = min(window, max(1.0, seg["duration"] - into))
+
+    # Windows are quantised so that scrubbing around one moment keeps asking
+    # for the same file instead of cutting a new one at every position.
+    grid = max(1.0, window)
+    aligned = int(into // grid) * grid
+    length = min(grid, max(1.0, seg["duration"] - aligned))
+    key = f"{seg['name']}.{int(aligned)}.{int(length)}.mp4"
+
+    cached = WINDOW_DIR / key
+    if not (cached.exists() and cached.stat().st_size > 0):
+        try:
+            _take_slot()
+        except MediaBusy:
+            return make_response(jsonify({"ok": False, "error": "busy"}), 503)
+        try:
+            built, err = _build_window(seg, aligned, length, key)
+        finally:
+            _media_slots.release()
+        if built is None:
+            log.error("Window build failed for %s: %s", key, err)
+            return make_response(jsonify({"ok": False, "error": "cut failed"}),
+                                 500)
+
+    resp = send_from_directory(WINDOW_DIR, key, mimetype="video/mp4",
+                               conditional=True)
+    resp.headers["X-Segment"] = seg["name"]
+    resp.headers["X-Window-Start"] = f"{(seg['start'] - ArchiveIndex.midnight(day)) + aligned:.1f}"
+    resp.headers["X-Window"] = f"{length:.1f}"
+    resp.headers["Cache-Control"] = "private, max-age=300"
+    return resp
+
+
+@app.route("/clip")
+def clip():
+    """Cut [from, to] out of the archive and hand back a real MP4 file.
+
+    Ranges that straddle a restart are stitched: each file is cut with its
+    own fast seek and the pieces are concatenated, because seeking through a
+    concatenation instead takes twelve times as long. Gaps inside the range
+    cannot be filled - the burned-in clock in the picture jumps, and the
+    header reports how much time is missing.
+    """
+    day = _parse_day(request.args.get("day", ""))
+    if day is None:
+        return make_response(jsonify({"ok": False, "error": "bad day"}), 400)
+
+    start = max(0.0, _float_arg("from", 0.0))
+    end = _float_arg("to", 0.0)
+    span = end - start
+    if span <= 0:
+        return make_response(jsonify({"ok": False, "error": "empty range"}), 400)
+    if span > CLIP_MAX_SECONDS:
+        return make_response(jsonify({
+            "ok": False,
+            "error": f"clip longer than {CLIP_MAX_SECONDS // 60} minutes",
+        }), 400)
+
+    cuts = archive.overlapping(day, start, end)
+    if not cuts:
+        return make_response(jsonify({
+            "ok": False, "error": "no recording in that range"}), 404)
+
+    covered = sum(c["take"] for c in cuts)
+    try:
+        _take_slot()
+    except MediaBusy:
+        return make_response(jsonify({"ok": False, "error": "busy"}), 503)
+
+    CLIP_DIR.mkdir(parents=True, exist_ok=True)
+    work = Path(tempfile.mkdtemp(dir=CLIP_DIR, prefix="clip-"))
+    out = work / "clip.mp4"
+    try:
+        pieces = []
+        for i, cut in enumerate(cuts):
+            piece = work / f"{i:03d}.ts"
+            ok, err = _run_media([
+                "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
+                "-ss", f"{cut['seek']:.3f}", "-t", f"{cut['take']:.3f}",
+                "-i", str(VIDEO_DIR / cut["name"]),
+                "-c", "copy", "-f", "mpegts", "-y", str(piece),
+            ])
+            if not ok or not piece.exists() or piece.stat().st_size == 0:
+                log.error("Clip piece failed for %s: %s", cut["name"], err)
+                continue
+            pieces.append(piece)
+
+        if not pieces:
+            raise RuntimeError("no usable footage in that range")
+
+        if len(pieces) == 1:
+            ok, err = _run_media([
+                "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
+                "-i", str(pieces[0]), "-c", "copy", "-an",
+                "-movflags", "+faststart", "-y", str(out),
+            ])
+        else:
+            listing = work / "list.txt"
+            listing.write_text("".join(f"file '{p}'\n" for p in pieces))
+            # No -ss here: the pieces already start where they should, so
+            # the concat demuxer never has to seek.
+            ok, err = _run_media([
+                "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
+                "-f", "concat", "-safe", "0", "-i", str(listing),
+                "-c", "copy", "-an", "-movflags", "+faststart", "-y", str(out),
+            ])
+        if not ok or not out.exists() or out.stat().st_size == 0:
+            raise RuntimeError(err or "ffmpeg produced nothing")
+
+        size = out.stat().st_size
+        payload = out.read_bytes() if size <= 8 * 2**20 else None
+    except Exception as exc:
+        shutil.rmtree(work, ignore_errors=True)
+        _media_slots.release()
+        log.error("Clip failed: %s", exc)
+        return make_response(jsonify({"ok": False, "error": str(exc)}), 500)
+
+    def deliver():
+        try:
+            if payload is not None:
+                yield payload
+                return
+            with open(out, "rb") as fh:
+                while True:
+                    chunk = fh.read(262144)
+                    if not chunk:
+                        break
+                    yield chunk
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+            _media_slots.release()
+
+    stamp = (datetime.fromtimestamp(ArchiveIndex.midnight(day) + start)
+             .strftime("%Y%m%d-%H%M%S"))
+    resp = Response(deliver(), mimetype="video/mp4")
+    resp.headers["Content-Length"] = str(size)
+    resp.headers["Content-Disposition"] = (
+        f'attachment; filename="cam-{stamp}-{int(span)}s.mp4"')
+    resp.headers["X-Covered-Seconds"] = f"{covered:.1f}"
+    resp.headers["X-Missing-Seconds"] = f"{max(0.0, span - covered):.1f}"
+    return resp
+
+
+def sweep_clips() -> None:
+    """Clear scratch left behind by a crash, and re-budget the window cache."""
+    try:
+        for stale in CLIP_DIR.glob("clip-*"):
+            shutil.rmtree(stale, ignore_errors=True)
+        for partial in WINDOW_DIR.glob(".*"):
+            partial.unlink(missing_ok=True)
+        _sweep_windows()
+    except Exception:
+        pass
 
 
 @app.route("/Start_New_File", methods=["POST"])
@@ -1252,6 +1824,7 @@ def main() -> None:
 
     setup_logging()
     VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+    sweep_clips()
 
     log.info("Camera service starting in %s", BASE_DIR)
     now = datetime.now().astimezone()

@@ -406,3 +406,388 @@
     }
   });
 })();
+
+/* Archive player.
+ *
+ * The page owns the day timeline; the <video> element is only a viewport
+ * onto one bounded window of it. Seeking anywhere reloads the element from
+ * /play at that second, which is why no media-source library is needed - the
+ * server hands over an ordinary MP4 every time.
+ *
+ * Times shown are wall-clock, derived server-side from each file's length and
+ * last write. They are good to a couple of seconds; the clock burned into the
+ * picture is the authority, and the UI says so rather than implying otherwise.
+ */
+(function () {
+  "use strict";
+
+  var root = document.getElementById("watch");
+  if (!root) return;
+
+  var $ = function (id) { return document.getElementById(id); };
+  var DAY_SECONDS = 86400;
+
+  var day = root.dataset.day;
+  var data = null;            // last /timeline payload
+  var windowStart = null;     // second-of-day the loaded window begins at
+  var windowLength = 0;
+
+  var player = $("player");
+  var timeline = $("tl");
+
+  // ------------------------------------------------------------- helpers --
+  function pad2(n) { return String(n).padStart(2, "0"); }
+
+  function hms(sec) {
+    sec = Math.max(0, Math.round(sec));
+    return pad2(Math.floor(sec / 3600)) + ":" +
+           pad2(Math.floor(sec / 60) % 60) + ":" + pad2(sec % 60);
+  }
+
+  function parseHms(text) {
+    var parts = String(text).trim().split(":").map(Number);
+    if (parts.some(isNaN) || !parts.length || parts.length > 3) return null;
+    while (parts.length < 3) parts.push(0);
+    var sec = parts[0] * 3600 + parts[1] * 60 + parts[2];
+    return sec >= 0 && sec <= DAY_SECONDS ? sec : null;
+  }
+
+  var flashTimer = null;
+  function flash(msg, bad) {
+    var el = $("w-flash");
+    el.textContent = msg;
+    el.classList.toggle("bad", !!bad);
+    el.classList.add("show");
+    clearTimeout(flashTimer);
+    flashTimer = setTimeout(function () { el.classList.remove("show"); },
+                            bad ? 5000 : 2000);
+  }
+
+  // Where the player currently is, in seconds-of-day.
+  function position() {
+    if (windowStart === null) return null;
+    return windowStart + (player.currentTime || 0);
+  }
+
+  // ------------------------------------------------------------ timeline --
+  function drawTimeline() {
+    var track = $("tl-track");
+    track.textContent = "";
+    (data.segments || []).forEach(function (seg) {
+      var el = document.createElement("div");
+      el.className = "tl-seg";
+      el.style.left = (seg.from / DAY_SECONDS * 100) + "%";
+      el.style.width = Math.max(0.15, (seg.to - seg.from) / DAY_SECONDS * 100) + "%";
+      el.title = hms(seg.from) + " – " + hms(seg.to) + "  (" + seg.name + ")";
+      track.appendChild(el);
+    });
+
+    var ticks = $("tl-ticks");
+    ticks.textContent = "";
+    for (var h = 0; h <= 24; h += 3) {
+      var tick = document.createElement("span");
+      tick.className = "tl-tick";
+      tick.style.left = (h / 24 * 100) + "%";
+      tick.textContent = pad2(h) + ":00";
+      ticks.appendChild(tick);
+    }
+
+    var covered = data.covered_seconds || 0;
+    var gapCount = (data.gaps || []).length;
+    $("tl-summary").textContent =
+      (data.segments || []).length + " recording" +
+      ((data.segments || []).length === 1 ? "" : "s") + " · " +
+      hms(covered).slice(0, 5).replace(":", "h ") + "m of footage" +
+      (gapCount ? " · " + gapCount + " gap" + (gapCount === 1 ? "" : "s") +
+                  " where the recorder was down" : " · no gaps") +
+      " · times ±2s (the clock in the picture is exact)";
+  }
+
+  function drawMarkers() {
+    var from = parseHms($("clip-from").value);
+    var to = parseHms($("clip-to").value);
+    var sel = $("tl-sel");
+    if (from === null || to === null || to <= from) { sel.hidden = true; return; }
+    sel.hidden = false;
+    sel.style.left = (from / DAY_SECONDS * 100) + "%";
+    sel.style.width = ((to - from) / DAY_SECONDS * 100) + "%";
+  }
+
+  function drawCursor() {
+    var at = position();
+    var cur = $("tl-cursor");
+    if (at === null) { cur.hidden = true; return; }
+    cur.hidden = false;
+    cur.style.left = (at / DAY_SECONDS * 100) + "%";
+    timeline.setAttribute("aria-valuenow", Math.round(at));
+    timeline.setAttribute("aria-valuetext", hms(at));
+  }
+
+  // ---------------------------------------------------------- load a day --
+  function loadDay(which) {
+    return fetch("/timeline?day=" + encodeURIComponent(which),
+                 { credentials: "include" })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (!j.ok) { flash(j.error || "no such day", true); return; }
+        day = which;
+        data = j;
+        root.dataset.day = which;
+        $("w-day").textContent = which;
+
+        var pick = $("day-pick");
+        pick.textContent = "";
+        (j.days || []).forEach(function (d) {
+          var opt = document.createElement("option");
+          opt.value = d;
+          opt.textContent = d;
+          opt.selected = d === which;
+          pick.appendChild(opt);
+        });
+
+        drawTimeline();
+        drawMarkers();
+        windowStart = null;
+        player.removeAttribute("src");
+        player.load();
+        $("w-pos").textContent = "--:--:--";
+        $("w-seg").textContent = (j.segments || []).length
+          ? "pick a moment on the timeline" : "nothing recorded this day";
+      })
+      .catch(function () { flash("could not load that day", true); });
+  }
+
+  // ------------------------------------------------------------ playback --
+  /* The server cuts playback in fixed windows aligned to each recording's
+   * start, so that scrubbing around one moment keeps hitting the same cut
+   * instead of making a new one per position. The page works out the same
+   * boundary from the segment list it already has - no extra round-trip, and
+   * the displayed clock stays exact because the window start is known rather
+   * than assumed. */
+  function windowFor(second) {
+    var segs = (data && data.segments) || [];
+    var size = (data && data.window) || 120;
+    for (var i = 0; i < segs.length; i++) {
+      var s = segs[i];
+      if (second >= s.from && second < s.to) {
+        var aligned = Math.floor((second - s.from) / size) * size;
+        return {
+          start: s.from + aligned,
+          length: Math.min(size, (s.to - s.from) - aligned),
+          name: s.name
+        };
+      }
+    }
+    return null;
+  }
+
+  var pendingSeek = 0;
+
+  function seekTo(second, autoplay) {
+    if (!data) return;
+    second = Math.max(0, Math.min(DAY_SECONDS - 1, second));
+
+    var w = windowFor(second);
+    if (!w) {
+      // The timeline already says where the holes are, so skip without
+      // asking the server and getting an error back.
+      var next = null;
+      (data.segments || []).forEach(function (s) {
+        if (s.from > second && (next === null || s.from < next)) next = s.from;
+      });
+      if (next === null) {
+        flash("no recording after " + hms(second), true);
+        $("w-seg").textContent = "nothing further this day";
+        return;
+      }
+      flash("gap — skipping to " + hms(next));
+      seekTo(next + 0.5, autoplay);
+      return;
+    }
+
+    // Already holding this window: move inside it, no request at all.
+    if (windowStart === w.start && player.readyState >= 1) {
+      player.currentTime = Math.max(0, second - w.start);
+      if (autoplay !== false && player.paused) {
+        var again = player.play();
+        if (again && again.catch) again.catch(function () {});
+      }
+      $("w-pos").textContent = hms(second);
+      drawCursor();
+      return;
+    }
+
+    windowStart = w.start;
+    windowLength = w.length;
+    pendingSeek = second - w.start;
+    $("w-seg").textContent = w.name;
+    player.src = "/play?day=" + encodeURIComponent(day) +
+                 "&t=" + w.start.toFixed(1);
+    player.load();
+    if (autoplay !== false) {
+      var go = player.play();
+      if (go && go.catch) go.catch(function () {});
+    }
+    $("w-pos").textContent = hms(second);
+    drawCursor();
+  }
+
+  /* Move by a small amount. Staying inside the window that is already loaded
+   * is just a currentTime assignment - instant, and no request at all. Only
+   * a jump past the loaded window costs a new one. */
+  function nudge(delta) {
+    var at = position();
+    if (at === null) { flash("pick a moment first", true); return; }
+    seekTo(Math.max(0, at + delta), !player.paused);
+  }
+
+  // Gaps are handled before asking, from the timeline; this is the backstop
+  // for a window that genuinely failed to cut.
+  player.addEventListener("error", function () {
+    if (windowStart === null) return;
+    flash("could not load that window", true);
+  });
+
+  player.addEventListener("loadedmetadata", function () {
+    if (isFinite(player.duration) && player.duration > 0) {
+      windowLength = player.duration;
+    }
+    if (pendingSeek > 0.2 && pendingSeek < windowLength) {
+      player.currentTime = pendingSeek;    // land on the moment asked for
+    }
+    pendingSeek = 0;
+    drawCursor();
+  });
+
+  player.addEventListener("timeupdate", function () {
+    var at = position();
+    if (at === null) return;
+    $("w-pos").textContent = hms(at);
+    drawCursor();
+  });
+
+  // Window over: roll straight into the next one so playback continues.
+  player.addEventListener("ended", function () {
+    if (windowStart === null) return;
+    var next = windowStart + (windowLength || 0);
+    if (next >= DAY_SECONDS) return;
+    seekTo(next, true);
+  });
+
+  // -------------------------------------------------------- interactions --
+  function secondFromEvent(ev) {
+    var r = timeline.getBoundingClientRect();
+    var x = (ev.clientX - r.left) / r.width;
+    return Math.max(0, Math.min(1, x)) * DAY_SECONDS;
+  }
+
+  timeline.addEventListener("click", function (ev) {
+    seekTo(secondFromEvent(ev), true);
+  });
+
+  timeline.addEventListener("keydown", function (ev) {
+    var step = ev.shiftKey ? 600 : 60;
+    var at = position();
+    if (at === null) at = 0;
+    if (ev.key === "ArrowRight") { ev.preventDefault(); seekTo(at + step, true); }
+    if (ev.key === "ArrowLeft") { ev.preventDefault(); seekTo(at - step, true); }
+  });
+
+  document.querySelectorAll("[data-seek]").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      nudge(parseInt(btn.dataset.seek, 10));
+    });
+  });
+
+  $("day-prev").addEventListener("click", function () { stepDay(-1); });
+  $("day-next").addEventListener("click", function () { stepDay(1); });
+  $("day-pick").addEventListener("change", function () { loadDay(this.value); });
+
+  function stepDay(delta) {
+    var parts = day.split("-").map(Number);
+    var d = new Date(parts[0], parts[1] - 1, parts[2]);
+    d.setDate(d.getDate() + delta);
+    loadDay(d.getFullYear() + "-" + pad2(d.getMonth() + 1) + "-" + pad2(d.getDate()));
+  }
+
+  // ----------------------------------------------------------- clip marks --
+  $("mark-in").addEventListener("click", function () {
+    var at = position();
+    if (at === null) { flash("play something first", true); return; }
+    $("clip-from").value = hms(at);
+    drawMarkers();
+  });
+
+  $("mark-out").addEventListener("click", function () {
+    var at = position();
+    if (at === null) { flash("play something first", true); return; }
+    $("clip-to").value = hms(at);
+    drawMarkers();
+  });
+
+  document.querySelectorAll("[data-nudge]").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var from = parseHms($("clip-from").value);
+      if (from === null) { flash("start time is not a time", true); return; }
+      $("clip-to").value = hms(from + parseInt(btn.dataset.nudge, 10));
+      drawMarkers();
+    });
+  });
+
+  ["clip-from", "clip-to"].forEach(function (id) {
+    $(id).addEventListener("change", drawMarkers);
+  });
+
+  $("clip-preview").addEventListener("click", function () {
+    var from = parseHms($("clip-from").value);
+    if (from === null) { flash("start time is not a time", true); return; }
+    seekTo(from, true);
+  });
+
+  $("clip-go").addEventListener("click", function () {
+    var from = parseHms($("clip-from").value);
+    var to = parseHms($("clip-to").value);
+    if (from === null || to === null) { flash("times must be HH:MM:SS", true); return; }
+    if (to <= from) { flash("end must be after start", true); return; }
+    var max = (data && data.clip_max) || 1800;
+    if (to - from > max) {
+      flash("longest clip is " + Math.round(max / 60) + " minutes", true);
+      return;
+    }
+    var btn = this;
+    btn.disabled = true;
+    var was = btn.textContent;
+    btn.textContent = "CUTTING…";
+    flash("cutting " + hms(to - from) + "…");
+
+    var url = "/clip?day=" + encodeURIComponent(day) +
+              "&from=" + from + "&to=" + to;
+    // Fetched rather than linked so a failure surfaces as a message instead
+    // of replacing the page with JSON.
+    fetch(url, { credentials: "include" })
+      .then(function (r) {
+        if (!r.ok) {
+          return r.json().then(function (j) { throw new Error(j.error || "failed"); });
+        }
+        var missing = parseFloat(r.headers.get("X-Missing-Seconds") || "0");
+        return r.blob().then(function (blob) { return { blob: blob, missing: missing }; });
+      })
+      .then(function (res) {
+        var href = URL.createObjectURL(res.blob);
+        var a = document.createElement("a");
+        a.href = href;
+        a.download = "cam-" + day + "-" + hms(from).replace(/:/g, "") + ".mp4";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(function () { URL.revokeObjectURL(href); }, 30000);
+        flash(res.missing > 1
+              ? "saved — " + Math.round(res.missing) + "s missing (recorder was down)"
+              : "clip saved");
+      })
+      .catch(function (err) { flash(err.message || "clip failed", true); })
+      .finally(function () { btn.disabled = false; btn.textContent = was; });
+  });
+
+  loadDay(day);
+})();

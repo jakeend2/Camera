@@ -365,6 +365,57 @@ mosquitto_sub -h 127.0.0.1 -u camera -P '<password>' -t 'camera/#' -v
 
 ---
 
+## Watching and clipping the archive
+
+The recordings are MPEG-TS, which no browser plays. Rather than ship a
+media-source library to decode it in the page, the server hands the browser
+an ordinary MP4 cut on demand: ffmpeg copies the H.264 bitstream and rewrites
+only the container, so nothing is re-encoded, the picture is bit-identical to
+what was recorded, and a cut costs about a second.
+
+**Where the times come from.** Nothing inside a .ts file records wall-clock
+time, so each file's span is derived from the filesystem. The anchor is the
+file's *birth* time - ext4 keeps it, `stat -c %W` reads it, and it survives
+the rename that turns today's file into a `.partNN` on restart. Checked
+against the timestamp burned into the picture: a clip asked for at 13:20:50
+started on the frame stamped 13:20:50.
+
+mtime was tried first and is wrong. It is when the file was last written,
+which trails the final recorded frame by anything from 2s to 30s depending on
+how that ffmpeg ended - a clip asked for at 13:17:47 came back at 13:17:18.
+That is also why a segment's end is start + duration and never mtime:
+claiming footage that was never written makes playback seek into nothing.
+Where ffmpeg's duration overruns the next file's birth time, the duration is
+trimmed, because the birth time is a fact and the duration is an estimate.
+
+**Gaps are real and are drawn.** Every restart ends one file and begins
+another, and whatever happened in between was not recorded. The timeline
+shows the holes instead of closing them up, clicking into one skips to the
+next footage, and a clip spanning a hole reports the missing seconds in an
+`X-Missing-Seconds` header - the burned-in clock jumping is the proof.
+
+**Playback is windowed.** `/play` serves a complete, seekable MP4 covering
+PLAY_WINDOW_SECONDS (120 by default), aligned to the recording's start so
+that scrubbing around one moment keeps hitting the same cut. Finished windows
+stay in `clips/windows` up to WINDOW_CACHE_MB (1024) so a scrub backwards or
+a range request costs nothing; the page reaches the same boundary arithmetic
+from the segment list, so its clock stays exact without asking.
+
+A fragmented stream was tried first and is worse: with no duration in the
+moov, the browser reported a 299s window as 6s, its scrubber did nothing, and
+it could not seek inside what it already held.
+
+**Clips** come from `/clip?day=&from=&to=`, capped at CLIP_MAX_SECONDS (1800).
+A range crossing a restart is stitched: each file is cut with its own fast
+seek and the pieces are concatenated. Seeking *through* a concatenation
+instead was measured at 28.8s against 2.3s, which is why it is done this way.
+
+Archive work runs `nice -n 10 ionice -c 3` and no more than MEDIA_JOBS (3) at
+once, with requests refused rather than queued after MEDIA_WAIT seconds. The
+live recording always wins.
+
+---
+
 ## The camera itself: verified, confirmed, gated
 
 The MIC 612 is driven blind - RS-485 is one-way, nothing is ever read back -

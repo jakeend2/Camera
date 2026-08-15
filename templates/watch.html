@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+
+{% block body %}
+<main class="watch" id="watch" data-day="{{ day }}">
+
+  <section class="watch-video">
+    <div class="video-frame">
+      <video id="player" controls playsinline preload="auto"></video>
+      <div class="watch-strip">
+        <span class="st-item" id="w-pos">--:--:--</span>
+        <span class="st-item" id="w-seg">&ndash;</span>
+        <span class="st-spacer"></span>
+        <span class="st-item" id="w-flash" role="status" aria-live="polite"></span>
+      </div>
+    </div>
+  </section>
+
+  <section class="rail-sec">
+    <div class="watch-head">
+      <h2 class="sec-title">ARCHIVE &mdash; <span id="w-day">{{ day }}</span></h2>
+      <div class="chip-row">
+        <button class="chip" id="day-prev">&larr; PREV</button>
+        <select class="preset-input day-select" id="day-pick"
+                aria-label="Choose a day"></select>
+        <button class="chip" id="day-next">NEXT &rarr;</button>
+        <a class="pill pill-link" href="{{ url_for('index') }}">LIVE CAMERA</a>
+      </div>
+    </div>
+
+    <div class="tl-wrap">
+      <div class="tl" id="tl" role="slider" tabindex="0"
+           aria-label="Day timeline. Left and right arrows move by one minute."
+           aria-valuemin="0" aria-valuemax="86400" aria-valuenow="0">
+        <div class="tl-track" id="tl-track"></div>
+        <div class="tl-sel" id="tl-sel" hidden></div>
+        <div class="tl-cursor" id="tl-cursor" hidden></div>
+      </div>
+      <div class="tl-ticks" id="tl-ticks" aria-hidden="true"></div>
+      <div class="chip-row seek-row" role="group" aria-label="Fine seek">
+        <button class="chip" data-seek="-300">&minus;5m</button>
+        <button class="chip" data-seek="-60">&minus;1m</button>
+        <button class="chip" data-seek="-10">&minus;10s</button>
+        <button class="chip" data-seek="10">+10s</button>
+        <button class="chip" data-seek="60">+1m</button>
+        <button class="chip" data-seek="300">+5m</button>
+      </div>
+      <p class="hint" id="tl-summary">Loading the day&hellip;</p>
+      <p class="hint">One pixel of this bar is a couple of minutes, so click
+      for the neighbourhood and then use the seek buttons, the player&rsquo;s
+      own scrubber, or type an exact time below.</p>
+    </div>
+  </section>
+
+  <section class="rail-sec">
+    <h2 class="sec-title">EXTRACT A CLIP</h2>
+    <div class="chip-row">
+      <label class="clip-field">
+        <span>FROM</span>
+        <input class="preset-input time-input" id="clip-from" value="00:00:00"
+               inputmode="numeric" maxlength="8" aria-label="Clip start time">
+      </label>
+      <button class="chip" id="mark-in">SET&nbsp;&#9664;</button>
+      <label class="clip-field">
+        <span>TO</span>
+        <input class="preset-input time-input" id="clip-to" value="00:01:00"
+               inputmode="numeric" maxlength="8" aria-label="Clip end time">
+      </label>
+      <button class="chip" id="mark-out">SET&nbsp;&#9654;</button>
+    </div>
+    <div class="chip-row">
+      <button class="chip" data-nudge="60">+1 MIN</button>
+      <button class="chip" data-nudge="300">+5 MIN</button>
+      <button class="chip" id="clip-preview">PREVIEW</button>
+      <button class="chip chip-set" id="clip-go">DOWNLOAD CLIP</button>
+    </div>
+    <p class="hint" id="clip-note">
+      SET&nbsp;&#9664; and SET&nbsp;&#9654; take the player&rsquo;s current position.
+      Clips are cut without re-encoding, so the picture is identical to the
+      recording and a few minutes takes about a second.
+    </p>
+  </section>
+
+</main>
+{% endblock %}

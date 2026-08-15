@@ -16,3 +16,5 @@ __pycache__/
 # Editor / IDE state
 .vs/
 .vscode/
+clips/
+logs/archive-index.json

@@ -225,7 +225,7 @@ drive the others.
                           ffmpeg and mosquitto are system packages
 
    templates/             base.html, index.html, login.html,
-                          recordings.html (the archive browser)
+                          recordings.html (file list), watch.html (player)
    static/                lcars.css, main.js and the vendored Antonio font.
                           No frameworks and nothing fetched from a CDN - the
                           interface works with no internet at all, and the

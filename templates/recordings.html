@@ -7,6 +7,7 @@
     <p class="rec-meta">{{ entries|length }} files &middot; {{ total_gb }} GB used
       &middot; {{ free_gb }} GB free &middot; kept {{ retention_days }} days</p>
     <a class="pill pill-link" href="{{ url_for('index') }}">&larr; BACK TO CAMERA</a>
+    <a class="pill pill-link" href="{{ url_for('watch') }}">OPEN PLAYER</a>
   </div>
 
   {% if entries %}
@@ -21,7 +22,10 @@
         <td class="mono">{{ e.name }}{% if e.growing %}
           <span class="rec-live">&#9679; recording</span>{% endif %}</td>
         <td class="num">{{ e.size_gb }} GB</td>
-        <td><a class="chip chip-go" href="{{ url_for('recording_file', name=e.name) }}">DOWNLOAD</a></td>
+        <td class="rec-actions">
+          <a class="chip chip-go" href="{{ url_for('watch', day=e.day) }}">WATCH</a>
+          <a class="chip" href="{{ url_for('recording_file', name=e.name) }}">RAW</a>
+        </td>
       </tr>
       {% endfor %}
     </tbody>
