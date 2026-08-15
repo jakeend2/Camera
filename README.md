@@ -202,7 +202,9 @@ drive the others.
                                            the broker as a Last Will if the
                                            service dies without saying goodbye
    camera/state        retained JSON health snapshot, refreshed every 30s
-   camera/ptz/set      subscribed: {"action": "pan_left"} or a bare string
+   camera/ptz/set      subscribed: {"action": "pan_left", "speed": 1-63},
+                       a bare action string, or {"action": "move", "pan": -1|0|1,
+                       "tilt": -1|0|1, "panSpeed": n, "tiltSpeed": n}
    camera/ptz/result   outcome of the last command
 
    garage/#            reserved for a ratgdo controller  (not yet installed)
@@ -222,10 +224,12 @@ drive the others.
    requirements.txt       flask, flask-login, pyserial, paho-mqtt, cheroot
                           ffmpeg and mosquitto are system packages
 
-   templates/             base.html, index.html, login.html
-   static/                lcars.css, vendored Bootstrap, jQuery and the
-                          Antonio font — nothing is fetched from a CDN, so
-                          the interface works with no internet at all
+   templates/             base.html, index.html, login.html,
+                          recordings.html (the archive browser)
+   static/                lcars.css, main.js and the vendored Antonio font.
+                          No frameworks and nothing fetched from a CDN - the
+                          interface works with no internet at all, and the
+                          CSP allows no inline code whatsoever
 
    deploy/                everything needed to stand this up on a fresh Pi,
                           plus the router steps that cannot be scripted.

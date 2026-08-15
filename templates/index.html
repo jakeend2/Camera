@@ -1,331 +1,140 @@
 {% extends 'base.html' %}
 
-{% block head %}
-<!-- No additional head content needed -->
-{% endblock %}
-
 {% block body %}
-<!-- Main Content - Video Display and Controls -->
-<div class="lcars-content">
-  <!-- Video Display -->
-  <div class="lcars-video-container">
-    <div class="lcars-video-frame">
-      <img alt="Camera Feed" src="{{ url_for('camera')}}">
+<main class="app" id="app"
+      data-diagonals="{{ 1 if diagonals else 0 }}"
+      data-default-speed="{{ default_speed }}">
+
+  <!-- ================= VIDEO ================= -->
+  <section class="video-pane">
+    <div class="video-frame" id="video-frame">
+      <img id="feed" alt="Live camera feed" src="{{ url_for('camera') }}">
+
+      <div class="status-strip">
+        <span class="st-item" id="st-rec"><span class="st-dot" id="rec-dot"></span>REC</span>
+        <span class="st-item" id="st-img">IMG:?</span>
+        <span class="st-item" id="st-link">LINK ·</span>
+        <span class="st-item" id="st-spd">SPD {{ default_speed }}</span>
+        <span class="st-spacer"></span>
+        <span class="st-item" id="st-flash" role="status" aria-live="polite"></span>
+        <span class="st-item st-clock" id="strip-clock"></span>
+      </div>
+
+      <div class="osd-banner" id="osd-banner" hidden>
+        OSD MODE &mdash; pad navigates &middot; SELECT confirms &middot; zoom highlights Exit
+      </div>
+
+      <button class="fs-btn" id="fs-btn" aria-label="Toggle fullscreen">&#x26F6;</button>
     </div>
-  </div>
-  
-  <!-- Camera Control Section Header -->
-  <div class="lcars-section-header-grid">
-    <div class="lcars-section-header-grid-text">CAMERA CONTROL</div>
-  </div>
-  
-  <!-- Direction Controls - Modern LCARS Grid Style -->
-  <div class="lcars-control-grid">
-    <!-- Control buttons - arranged in a grid -->
-    <button class="thermal" onclick="Thermal_Camera();">THERMAL</button>
-    <button class="focus-near" data-hold="focus_near">FOCUS-</button>
-    <button class="up" data-hold="tilt_up">▲</button>
-    <button class="focus-far" data-hold="focus_far">FOCUS+</button>
-    <button class="wiper" onclick="Windshield_Wiper();">WIPER</button>
-    
-    <button class="visible" onclick="Visible_Light_Camera();">VISIBLE</button>
-    <button class="left" data-hold="pan_left">◀</button>
-    <button class="home" onclick="stop();">●</button>
-    <button class="right" data-hold="pan_right">▶</button>
-    <button class="osd" onclick="OSD_menu();">OSD</button>
-    
-    <button class="preset1" onclick="Tour_1();">TOUR 1</button>
-    <button class="zoom-out" data-hold="zoom_wide">ZOOM-</button>
-    <button class="down" data-hold="tilt_down">▼</button>
-    <button class="zoom-in" data-hold="zoom_tele">ZOOM+</button>
-    <button class="preset2" onclick="Tour_2();">TOUR 2</button>
-  </div>
-  
-  <!-- Media Control Bar -->
-  <div class="lcars-media-controls">
-    <button class="lcars-media-button" onclick="Start_New_File();" title="Save Recording">⏺️</button>
-    <button class="lcars-media-button" onclick="Goto_preset(1);" style="background-color: var(--lcars-panel); color: var(--lcars-orange); border: 2px solid var(--lcars-orange);">1</button>
-    <button class="lcars-media-button" onclick="Goto_preset(2);" style="background-color: var(--lcars-panel); color: var(--lcars-orange); border: 2px solid var(--lcars-orange);">2</button>
-    <button class="lcars-media-button" onclick="Goto_preset(3);" style="background-color: var(--lcars-panel); color: var(--lcars-orange); border: 2px solid var(--lcars-orange);">3</button>
-    <button class="lcars-media-button" onclick="Set_preset(document.getElementById('flabber').value);" style="background-color: var(--lcars-orange); color: var(--lcars-black);">SET</button>
-    <input type="text" id="flabber" class="lcars-preset-input" placeholder="##">
-    <button class="lcars-media-button" style="margin-left: auto; background-color: var(--lcars-red); color: var(--lcars-black);" onclick="Exit_program();" title="Exit System">⏻</button>
-  </div>
-</div>
-{% endblock %}
+  </section>
 
-{% block script %}
-<script>
-  // JavaScript functions for camera control  
-  function pan_left() {
-    var message = "pan left message"
-    fetch('/pan_left', {
-      method: "POST",
-      credentials: "include",
-      body: JSON.stringify(message),
-      headers: new Headers({ "content-type": "application/json" })
-    })
-  }
-  
-  function stop() {
-    var message = "stop message"
-    fetch('/stop', {
-      method: "POST",
-      credentials: "include",
-      body: JSON.stringify(message),
-      headers: new Headers({ "content-type": "application/json" })
-    })
-  }
-  
-  function tilt_up() {
-    var message = "tilt up message"
-    fetch('/tilt_up', {
-      method: "POST",
-      credentials: "include",
-      body: JSON.stringify(message),
-      headers: new Headers({ "content-type": "application/json" })
-    })
-  }
-  
-  function tilt_down() {
-    var message = "tilt down message"
-    fetch('/tilt_down', {
-      method: "POST",
-      credentials: "include",
-      body: JSON.stringify(message),
-      headers: new Headers({ "content-type": "application/json" })
-    })
-  }
-  
-  function pan_right() {
-    var message = "pan right message"
-    fetch('/pan_right', {
-      method: "POST",
-      credentials: "include",
-      body: JSON.stringify(message),
-      headers: new Headers({ "content-type": "application/json" })
-    })
-  }
-  
-  function zoom_tele() {
-    var message = "zoom in message"
-    fetch('/zoom_tele', {
-      method: "POST",
-      credentials: "include",
-      body: JSON.stringify(message),
-      headers: new Headers({ "content-type": "application/json" })
-    })
-  }
-  
-  function zoom_wide() {
-    var message = "zoom out message"
-    fetch('/zoom_wide', {
-      method: "POST",
-      credentials: "include",
-      body: JSON.stringify(message),
-      headers: new Headers({ "content-type": "application/json" })
-    })
-  }
-  
-  function focus_near() {
-    var message = "focus near message"
-    fetch('/focus_near', {
-      method: "POST",
-      credentials: "include",
-      body: JSON.stringify(message),
-      headers: new Headers({ "content-type": "application/json" })
-    })
-  }
-  
-  function focus_far() {
-    var message = "focus far message"
-    fetch('/focus_far', {
-      method: "POST",
-      credentials: "include",
-      body: JSON.stringify(message),
-      headers: new Headers({ "content-type": "application/json" })
-    })
-  }
-  
-  function OSD_menu() {
-    var message = "osd menu message"
-    fetch('/OSD_menu', {
-      method: "POST",
-      credentials: "include",
-      body: JSON.stringify(message),
-      headers: new Headers({ "content-type": "application/json" })
-    })
-  }
-  
-  function Goto_preset() {
-    var presetNumber = document.getElementById("flabber").value;
-    var message = "goto preset " + presetNumber + " message"
-    fetch('/Goto_preset', {
-      method: "POST",
-      credentials: "include",
-      body: JSON.stringify({"flabber": presetNumber}),
-      headers: new Headers({ "content-type": "application/json" })
-    })
-  }
+  <!-- ================= CONTROLS ================= -->
+  <aside class="rail">
 
-  function Goto_preset(presetNum) {
-    var message = "goto preset " + presetNum + " message"
-    fetch('/Goto_preset', {
-      method: "POST",
-      credentials: "include",
-      body: JSON.stringify({"flabber": presetNum}),
-      headers: new Headers({ "content-type": "application/json" })
-    })
-  }
-  
-  function Set_preset() {
-    var presetNumber = document.getElementById("flabber").value;
-    var message = "set preset " + presetNumber + " message"
-    fetch('/Set_preset', {
-      method: "POST",
-      credentials: "include",
-      body: JSON.stringify({"flabber": presetNumber}),
-      headers: new Headers({ "content-type": "application/json" })
-    })
-  }
+    <section class="rail-sec">
+      <h2 class="sec-title">MOTION</h2>
+      <div class="motion-row">
+        <div class="dpad-wrap">
+          <svg id="dpad" viewBox="0 0 200 200" role="application"
+               aria-label="Pan and tilt control. Hold an edge to move, centre stops."
+               tabindex="0">
+            <circle class="dpad-ring" cx="100" cy="100" r="92"/>
+            <circle class="dpad-face" cx="100" cy="100" r="86"/>
+            <path class="dpad-arrow" id="arr-up"    d="M100 22 l12 20 h-24 z"/>
+            <path class="dpad-arrow" id="arr-down"  d="M100 178 l12 -20 h-24 z"/>
+            <path class="dpad-arrow" id="arr-left"  d="M22 100 l20 -12 v24 z"/>
+            <path class="dpad-arrow" id="arr-right" d="M178 100 l-20 -12 v24 z"/>
+            <circle class="dpad-stop" id="dpad-stop" cx="100" cy="100" r="27"/>
+            <text class="dpad-stop-label" x="100" y="105" text-anchor="middle">STOP</text>
+          </svg>
+        </div>
+        <div class="rockers">
+          <div class="rocker">
+            <button class="hold-btn" data-hold="zoom_tele">ZOOM+</button>
+            <button class="hold-btn" data-hold="zoom_wide">ZOOM&minus;</button>
+          </div>
+          <div class="rocker">
+            <button class="hold-btn" data-hold="focus_far">FOCUS+</button>
+            <button class="hold-btn" data-hold="focus_near">FOCUS&minus;</button>
+          </div>
+        </div>
+      </div>
+      <div class="speed-seg" id="speed-seg" role="group" aria-label="Movement speed">
+        <button data-speed="8">FINE</button>
+        <button data-speed="25">NORM</button>
+        <button data-speed="50">FAST</button>
+      </div>
+    </section>
 
-  function Set_preset(presetNum) {
-    if (!presetNum) {
-      presetNum = document.getElementById("flabber").value;
-    }
-    var message = "set preset " + presetNum + " message"
-    fetch('/Set_preset', {
-      method: "POST",
-      credentials: "include",
-      body: JSON.stringify({"flabber": presetNum}),
-      headers: new Headers({ "content-type": "application/json" })
-    })
-  }
-  
-  function Thermal_Camera() {
-    var message = "thermal camera message"
-    fetch('/Thermal_Camera', {
-      method: "POST",
-      credentials: "include",
-      body: JSON.stringify(message),
-      headers: new Headers({ "content-type": "application/json" })
-    })
-  }
-  
-  function Visible_Light_Camera() {
-    var message = "visible light camera message"
-    fetch('/Visible_Light_Camera', {
-      method: "POST",
-      credentials: "include",
-      body: JSON.stringify(message),
-      headers: new Headers({ "content-type": "application/json" })
-    })
-  }
-  
-  function Tour_1() {
-    var message = "tour 1 message"
-    fetch('/Tour_1', {
-      method: "POST",
-      credentials: "include",
-      body: JSON.stringify(message),
-      headers: new Headers({ "content-type": "application/json" })
-    })
-  }
-  
-  function Tour_2() {
-    var message = "tour 2 message"
-    fetch('/Tour_2', {
-      method: "POST",
-      credentials: "include",
-      body: JSON.stringify(message),
-      headers: new Headers({ "content-type": "application/json" })
-    })
-  }
-  
-  function Windshield_Wiper() {
-    var message = "windshield wiper message"
-    fetch('/Windshield_Wiper', {
-      method: "POST",
-      credentials: "include",
-      body: JSON.stringify(message),
-      headers: new Headers({ "content-type": "application/json" })
-    })
-  }
-  
-  function Start_New_File() {
-    var message = "save recording message"
-    fetch('/Start_New_File', {
-      method: "POST",
-      credentials: "include",
-      body: JSON.stringify(message),
-      headers: new Headers({ "content-type": "application/json" })
-    })
-  }
-  
-  function Exit_program() {
-    var message = "exit program message"
-    fetch('/Exit_program', {
-      method: "POST",
-      credentials: "include",
-      body: JSON.stringify(message),
-      headers: new Headers({ "content-type": "application/json" })
-    })
-  }
-    // --- press and hold -------------------------------------------------
-    // Pointer events, not mouse events. A phone does not deliver mousedown
-    // while a finger is still down - it synthesises one after the gesture
-    // ends, if at all - so the old handlers never started the movement, and
-    // the long press fell through to text selection instead.
-    const HOLD_ENDPOINTS = {
-      pan_left: '/pan_left',     pan_right: '/pan_right',
-      tilt_up: '/tilt_up',       tilt_down: '/tilt_down',
-      zoom_tele: '/zoom_tele',   zoom_wide: '/zoom_wide',
-      focus_near: '/focus_near', focus_far: '/focus_far'
-    };
+    <div class="quick-row">
+      <div class="seg" id="imager-seg" role="group" aria-label="Imager">
+        <button id="btn-vis"   data-cmd="/Visible_Light_Camera" aria-pressed="false">VIS</button>
+        <button id="btn-therm" data-cmd="/Thermal_Camera"       aria-pressed="false">THERM</button>
+      </div>
+      <button class="pill" id="btn-wiper" data-cmd="/Windshield_Wiper">WIPER</button>
+      <button class="pill" id="btn-snap">SNAP</button>
+    </div>
 
-    function postCmd(path) {
-      return fetch(path, {
-        method: "POST",
-        credentials: "include",
-        body: JSON.stringify({}),
-        headers: new Headers({ "content-type": "application/json" })
-      });
-    }
+    <nav class="tabs" id="tabs">
+      <button data-tab="presets" class="active">PRESETS</button>
+      <button data-tab="camera">CAM</button>
+      <button data-tab="sys">SYS</button>
+    </nav>
 
-    let holding = null;
+    <section class="rail-sec tabpane active" data-pane="presets">
+      <h2 class="sec-title">PRESETS</h2>
+      <div class="chip-row">
+        <button class="chip" data-goto="1">1</button>
+        <button class="chip" data-goto="2">2</button>
+        <button class="chip" data-goto="3">3</button>
+        <input id="preset-num" class="preset-input" inputmode="numeric"
+               maxlength="2" placeholder="##" aria-label="Preset number">
+        <button class="chip chip-go"  id="preset-go">GO</button>
+        <button class="chip chip-set" id="preset-set">SET</button>
+      </div>
+      <div class="chip-row">
+        <button class="pill" data-cmd="/Tour_1">TOUR 1</button>
+        <button class="pill" data-cmd="/Tour_2">TOUR 2</button>
+        <button class="pill" id="btn-home" disabled
+                title="Preset 34 - disabled pending a bench test">HOME</button>
+        <button class="pill" id="btn-flip" disabled
+                title="Preset 33 - disabled pending a bench test">FLIP</button>
+      </div>
+      <p class="hint">Presets 1&ndash;79. 33, 34, 62 and 80&ndash;99 are camera
+      functions and are refused.</p>
+    </section>
 
-    function beginHold(btn, ev) {
-      ev.preventDefault();          // suppress selection and the iOS callout
-      if (holding) return;
-      holding = btn;
-      btn.classList.add('is-held');
-      try { btn.setPointerCapture(ev.pointerId); } catch (e) {}
-      postCmd(HOLD_ENDPOINTS[btn.dataset.hold]);
-    }
+    <section class="rail-sec tabpane" data-pane="camera">
+      <h2 class="sec-title">CAMERA</h2>
+      <div class="chip-row">
+        <button class="hold-btn pill" data-hold="iris_open">IRIS+</button>
+        <button class="hold-btn pill" data-hold="iris_close">IRIS&minus;</button>
+      </div>
+      <div class="chip-row">
+        <button class="pill" id="btn-osd">OSD MENU</button>
+        <button class="pill pill-accent" id="btn-osd-select" hidden>SELECT</button>
+      </div>
+      <p class="hint">In the OSD menu the pad moves the cursor, SELECT
+      confirms, and zooming highlights Exit.</p>
+    </section>
 
-    function endHold() {
-      if (!holding) return;
-      holding.classList.remove('is-held');
-      holding = null;
-      postCmd('/stop');
-    }
+    <section class="rail-sec tabpane" data-pane="sys">
+      <h2 class="sec-title">SYSTEM</h2>
+      <dl class="sys-stats">
+        <div><dt>Recording</dt><dd id="sys-file">&ndash;</dd></div>
+        <div><dt>Today</dt><dd id="sys-size">&ndash;</dd></div>
+        <div><dt>Archive</dt><dd id="sys-archive">&ndash;</dd></div>
+        <div><dt>Disk free</dt><dd id="sys-free">&ndash;</dd></div>
+      </dl>
+      <div class="chip-row">
+        <button class="pill" id="btn-save" data-cmd="/Start_New_File">SAVE REC</button>
+        <a class="pill pill-link" href="{{ url_for('recordings') }}">ARCHIVE</a>
+      </div>
+      <div class="chip-row">
+        <button class="pill pill-danger" id="btn-restart">RESTART SVC</button>
+      </div>
+    </section>
 
-    document.querySelectorAll('[data-hold]').forEach(function (btn) {
-      btn.addEventListener('pointerdown', function (ev) { beginHold(btn, ev); });
-      btn.addEventListener('pointerup', endHold);
-      btn.addEventListener('pointercancel', endHold);
-      btn.addEventListener('lostpointercapture', endHold);
-      btn.addEventListener('contextmenu', function (ev) { ev.preventDefault(); });
-    });
-
-    // If the finger slides off, or the page is backgrounded mid hold, the
-    // pointerup may never reach the element - and the camera would keep
-    // panning. Always stop.
-    window.addEventListener('pointerup', endHold);
-    window.addEventListener('blur', endHold);
-    document.addEventListener('visibilitychange', function () {
-      if (document.hidden) endHold();
-    });
-
-</script>
+  </aside>
+</main>
 {% endblock %}

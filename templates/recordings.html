@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+
+{% block body %}
+<main class="rec-wrap">
+  <div class="rec-head">
+    <h2 class="sec-title">RECORDING ARCHIVE</h2>
+    <p class="rec-meta">{{ entries|length }} files &middot; {{ total_gb }} GB used
+      &middot; {{ free_gb }} GB free &middot; kept {{ retention_days }} days</p>
+    <a class="pill pill-link" href="{{ url_for('index') }}">&larr; BACK TO CAMERA</a>
+  </div>
+
+  {% if entries %}
+  <table class="rec-table">
+    <thead>
+      <tr><th>Day</th><th>File</th><th class="num">Size</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for e in entries %}
+      <tr>
+        <td>{{ e.day }}</td>
+        <td class="mono">{{ e.name }}{% if e.growing %}
+          <span class="rec-live">&#9679; recording</span>{% endif %}</td>
+        <td class="num">{{ e.size_gb }} GB</td>
+        <td><a class="chip chip-go" href="{{ url_for('recording_file', name=e.name) }}">DOWNLOAD</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="hint">Files are MPEG-TS &mdash; VLC and most desktop players open
+  them directly. A file marked recording is still being written; the download
+  is a snapshot of it.</p>
+  {% else %}
+  <p class="hint">No recordings yet.</p>
+  {% endif %}
+</main>
+{% endblock %}

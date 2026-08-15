@@ -1,8 +1,20 @@
-/* LCARS interface for Camera Control Hub - Authentic Star Trek TNG Edition */
+/* LCARS Camera Control - modern responsive layout, orange/black identity.
+ *
+ * Mobile-first: base rules are the 360px phone layout; >=1024px switches to
+ * video-pane + fixed side rail. The video frame always fills the usable
+ * space at 16:9 with object-fit: contain - never fill, which distorts PTZ
+ * geometry and thermal imagery.
+ *
+ * No external assets: the Antonio font is vendored, icons are unicode/SVG.
+ * The server CSP is default-src 'self' with NO unsafe-inline, so this file
+ * and main.js are the only styling and behaviour that can exist.
+ */
 
-/* Antonio, SIL Open Font License - see ../fonts/Antonio-OFL.txt.
-   One variable font covers every weight, served locally: the previous
-   jsdelivr URLs now 404, so the interface had silently lost its font. */
+/* ---------------------------------------------------------------- reset -- */
+*, *::before, *::after { box-sizing: border-box; }
+
+/* Antonio, SIL Open Font License - see ../fonts/Antonio-OFL.txt. One
+   variable font covers every weight, served locally. */
 @font-face {
   font-family: 'LCARS';
   src: url('../fonts/Antonio-Variable.ttf') format('truetype-variations');
@@ -11,941 +23,353 @@
 }
 
 :root {
-  /* LCARS color palette - authentic TNG colors */
-  --lcars-orange: #ff9c00;
-  --lcars-blue: #99b8ff;
-  --lcars-red: #ff5555;
+  --orange: #ff9c00;
+  --orange-dim: #b36d00;
+  --blue: #99b8ff;
+  --red: #ff5555;
+  --panel: #1a1a1a;
+  --panel-2: #101010;
+  --black: #000;
+  --text: #fff;
 
-  /* Neutral control surfaces - same tones as the login panel */
-  --lcars-panel: #1a1a1a;
-  
-  /* Background colors */
-  --lcars-black: #000000;
-  --lcars-bg-dark: #101010;
-  
-  /* Text colors */
-  --lcars-text: #ffffff;
-  
-  /* Border radius */
-  --lcars-border-radius: 25px;
-  --lcars-small-radius: 15px;
-  
-  /* Spacing */
-  --lcars-spacing-sm: 5px;
-  --lcars-spacing-md: 15px;
-  --lcars-spacing-lg: 30px;
+  --header-h: 48px;
+  --pad: 10px;
+  --tap: 44px;
+  --r-lg: 24px;
+  --r-md: 14px;
+  --r-sm: 8px;
+  --font: 'LCARS', 'Arial Narrow', sans-serif;
 }
 
-/* Base styles */
-body {
-  background-color: var(--lcars-black);
-  color: var(--lcars-text);
-  font-family: 'LCARS', 'Arial', sans-serif;
+html, body {
+  height: 100%;
   margin: 0;
-  padding: 0;
-  overflow-x: hidden;
-  letter-spacing: 1px;
+  background: var(--black);
+  color: var(--text);
+  font-family: var(--font);
+  letter-spacing: 0.05em;
 }
 
-/* Main LCARS layout structure - Updated for fullscreen video */
-.lcars-layout {
-  display: grid;
-  grid-template-columns: 0 1fr 0; /* Removed side panels */
-  grid-template-rows: 60px 1fr;
-  grid-template-areas:
-    "header header header"
-    "left main right";
-  height: 100vh;
-  gap: 15px;
-  padding: 10px;
-}
-
-.lcars-header {
-  grid-area: header;
-  height: 60px;
-  display: flex;
-  position: relative;
-  margin-bottom: 10px;
-}
-
-.lcars-panel-left {
-  grid-area: left;
+body {
   display: flex;
   flex-direction: column;
-  position: relative;
+  min-height: 100dvh;
 }
 
-.lcars-content {
-  grid-area: main;
+button {
+  font-family: var(--font);
+  letter-spacing: 0.06em;
+  cursor: pointer;
+}
+
+a { color: var(--blue); }
+
+/* --------------------------------------------------------------- topbar -- */
+.topbar {
+  flex: 0 0 var(--header-h);
   display: flex;
-  flex-direction: column;
-  position: relative;
-  max-width: 800px;
-  margin: 0 auto;
-  width: 100%;
+  align-items: stretch;
+  gap: 0;
+  padding: 6px var(--pad) 0;
 }
 
-.lcars-panel-right {
-  grid-area: right;
-  display: flex;
-  flex-direction: column;
-  position: relative;
-}
-
-/* Header elements - Cleaned up for better appearance */
-.lcars-header-bar {
-  display: flex;
-  width: 100%;
-  height: 100%;
-  position: relative;
-}
-
-.lcars-header-primary {
-  background-color: var(--lcars-orange);
-  height: 100%;
-  width: 120px; /* Match with elbow position in base.html */
-  border-top-left-radius: var(--lcars-border-radius);
-  border-bottom-left-radius: var(--lcars-border-radius);
-  border-top-right-radius: 0;
-  border-bottom-right-radius: 0;
+.topbar-primary {
+  background: var(--orange);
+  color: var(--black);
+  border-radius: var(--r-lg) 0 0 var(--r-lg);
   display: flex;
   align-items: center;
-  justify-content: center;
-  font-weight: bold;
-  color: var(--lcars-black);
-  font-size: 1rem;
+  padding: 0 16px;
+  font-weight: 700;
 }
 
-.lcars-header-separator {
-  width: 30px; /* Match with elbow width in base.html */
-  height: 100%;
-}
+.topbar-gap { width: 14px; background: transparent; }
 
-.lcars-header-secondary {
-  flex-grow: 1;
-  background-color: var(--lcars-orange);
+.topbar-secondary {
+  flex: 1;
+  min-width: 0;
+  background: var(--orange);
+  color: var(--black);
+  border-radius: 0 var(--r-lg) var(--r-lg) 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 20px;
-  border-top-right-radius: var(--lcars-border-radius);
-  border-bottom-right-radius: var(--lcars-border-radius);
+  gap: 10px;
+  padding: 0 14px;
 }
 
-.lcars-header-elbow {
-  position: absolute;
-  width: 30px; /* Match with base.html */
-  height: 15px; /* Match with base.html */
-  background-color: var(--lcars-black);
-  left: 120px; /* Match with base.html */
-  top: 0;
-  border-bottom-right-radius: var(--lcars-border-radius);
+.topbar-title {
+  font-weight: 700;
+  font-size: 1.05rem;
+  letter-spacing: 0.12em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
 }
 
-.lcars-title {
-  color: var(--lcars-black);
-  font-size: 1.4rem;
-  font-weight: bold;
-  text-transform: uppercase;
-  letter-spacing: 2px;
-}
-
-#clock {
-  color: var(--lcars-black);
-  font-size: 1rem;
-  font-weight: bold;
-  font-family: 'LCARS', monospace;
-}
-
-/* Section styling */
-.lcars-section {
-  margin-bottom: 15px;
-  position: relative;
-}
-
-.lcars-section-header {
-  display: flex;
-  margin-bottom: 8px;
-}
-
-.lcars-section-header-block {
-  height: 25px;
-  border-top-left-radius: var(--lcars-small-radius);
-  border-bottom-left-radius: var(--lcars-small-radius);
-  width: 40px;
-}
-
-.lcars-section-header-text {
+.topbar-right {
   display: flex;
   align-items: center;
-  height: 25px;
-  background-color: inherit;
-  padding-left: 15px;
-  font-weight: bold;
-  text-transform: uppercase;
-  letter-spacing: 1px;
-  font-size: 0.8rem;
-  border-top-right-radius: var(--lcars-small-radius);
-  border-bottom-right-radius: var(--lcars-small-radius);
-  flex-grow: 1;
+  gap: 12px;
+  flex-shrink: 0;
 }
 
-/* Video container - Simplified with clean edges */
-.lcars-video-container {
+.topbar-clock {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.topbar-logout {
+  color: var(--black);
+  background: var(--panel);
+  color: var(--orange);
+  text-decoration: none;
+  font-weight: 700;
+  font-size: 0.75rem;
+  padding: 6px 12px;
+  border-radius: var(--r-md);
+}
+
+@media (max-width: 767px) {
+  .topbar-clock { display: none; }     /* the strip carries the time */
+}
+
+/* ------------------------------------------------------------ app layout -- */
+.app {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: var(--pad);
+  gap: var(--pad);
+}
+
+.video-pane {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  min-width: 0;
+}
+
+.rail {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--pad);
+}
+
+@media (min-width: 1024px) {
+  .app { flex-direction: row; }
+  .video-pane { flex: 1; min-height: 0; }
+  .rail { flex: 0 0 320px; overflow-y: auto; }
+  /* nav.tabs outranks the later bare .tabs rule - source order would
+     otherwise turn the tab bar back on at desktop widths. */
+  nav.tabs { display: none; }
+  .tabpane { display: block !important; }
+  /* the 320px rail cannot host a 210px pad beside the rockers */
+  #dpad { width: 170px; }
+}
+
+/* ------------------------------------------------------------ video frame -- */
+.video-frame {
   position: relative;
   width: 100%;
-  border-radius: var(--lcars-small-radius);
-  overflow: visible;
-  margin-bottom: 25px;
-  background-color: var(--lcars-bg-dark);
   aspect-ratio: 16 / 9;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
+  background: var(--black);
+  border: 2px solid var(--orange);
+  border-radius: var(--r-md);
+  overflow: hidden;
 }
 
-/* Remove accent elements */
-.lcars-video-container::before,
-.lcars-video-container::after,
-.lcars-video-container .video-accent-top,
-.lcars-video-container .video-accent-bottom {
-  display: none;
+@media (min-width: 1024px) {
+  .video-frame {
+    /* as wide as fits without pushing past the viewport height */
+    width: min(100%, calc((100vh - var(--header-h) - 2 * var(--pad)) * 16 / 9));
+  }
 }
 
-.lcars-video-frame {
-  position: relative;
+.video-frame img {
+  display: block;
   width: 100%;
   height: 100%;
-  border: 3px solid var(--lcars-orange);
-  border-radius: var(--lcars-small-radius);
-  overflow: hidden;
-  box-shadow: 0 0 15px rgba(0,0,0,0.4);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background-color: var(--lcars-black);
-  z-index: 2;
-  padding: 0; /* Remove padding to maximize space */
+  object-fit: contain;   /* never fill: distorted geometry lies to you */
 }
 
-.lcars-video-frame img {
-  width: 100%; /* Force full width */
-  height: 100%; /* Force full height */
-  object-fit: fill; /* Stretch to fill the container */
-  display: block;
-}
-
-/* Button styles */
-.lcars-element {
-  border: none;
-  background-color: var(--lcars-orange);
-  color: var(--lcars-black);
-  font-family: 'LCARS', 'Arial', sans-serif;
-  font-weight: bold;
-  text-transform: uppercase;
-  letter-spacing: 1px;
-  cursor: pointer;
-  transition: all 0.2s ease;
-  position: relative;
-  margin-bottom: 8px;
-}
-
-.lcars-element:hover {
-  filter: brightness(1.2);
-}
-
-.lcars-element:active {
-  filter: brightness(0.8);
-}
-
-.lcars-button {
-  height: 35px;
-  border-radius: var(--lcars-small-radius);
-  padding: 0 12px;
-  display: flex;
-  align-items: center;
-  justify-content: flex-start;
-  width: 100%;
-  font-size: 0.8rem;
-  text-align: left;
-  padding-left: 15px;
-}
-
-/* Color variations */
-
-/* Button shapes */
-.lcars-pill {
-  border-radius: 50px;
-}
-
-.lcars-cap-left {
-  border-top-right-radius: 0;
-  border-bottom-right-radius: 0;
-}
-
-.lcars-cap-right {
-  border-top-left-radius: 0;
-  border-bottom-left-radius: 0;
-}
-
-.lcars-rounded-left {
-  border-top-left-radius: var(--lcars-small-radius);
-  border-bottom-left-radius: var(--lcars-small-radius);
-}
-
-.lcars-rounded-right {
-  border-top-right-radius: var(--lcars-small-radius);
-  border-bottom-right-radius: var(--lcars-small-radius);
-}
-
-.lcars-tall {
-  height: 50px;
-}
-
-.lcars-short {
-  height: 20px;
-}
-
-/* Camera controls section - Modified header with red color */
-.lcars-section-header-grid {
-  display: flex;
-  align-items: center;
-  height: 45px;
-  background-color: var(--lcars-orange);
-  border-radius: 0 0 var(--lcars-small-radius) var(--lcars-small-radius);
-  padding: 0 20px;
-  margin-bottom: 20px;
-  width: 100%; /* Ensure it spans the full width */
-  margin-left: auto;
-  margin-right: auto;
-  box-shadow: 0 3px 10px rgba(255, 156, 0, 0.2);
-}
-
-.lcars-section-header-grid-text {
-  color: var(--lcars-black);
-  font-weight: bold;
-  letter-spacing: 1px;
-  font-size: 1.2rem;
-  text-transform: uppercase;
-}
-
-/* Control grid for camera direction - Match content width */
-.lcars-control-grid {
-  display: grid;
-  grid-template-columns: repeat(5, 1fr);
-  grid-template-rows: repeat(4, 1fr);
-  gap: 10px;
-  width: 100%;
-  margin: 0 auto 40px;
-}
-
-/* Base button styles for control grid - Enhanced appearance */
-.lcars-control-grid button {
-  background-color: var(--lcars-panel);
-  color: var(--lcars-orange);
-  border: 2px solid var(--lcars-orange);
-  font-family: 'LCARS', 'Arial', sans-serif;
-  font-weight: bold;
-  font-size: 1rem;
-  text-transform: uppercase;
-  border: none;
-  cursor: pointer;
-  transition: all 0.2s ease;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  text-align: center;
-  min-height: 70px;
-  border-radius: 8px;
-  position: relative;
-  box-shadow: 0 2px 5px rgba(0,0,0,0.2);
-}
-
-.lcars-control-grid button:hover {
-  filter: brightness(1.1);
-  filter: brightness(1.15);
-}
-
-.lcars-control-grid button:active {
-  filter: brightness(0.9);
-  transform: translateY(1px);
-}
-
-/* Direction buttons */
-.lcars-control-grid .up {
-  grid-column: 3;
-  grid-row: 1;
-  background-color: var(--lcars-orange);
-  color: var(--lcars-black);
+.video-frame.pseudo-fs {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  width: auto;
+  aspect-ratio: auto;
+  border-radius: 0;
   border: none;
 }
 
-.lcars-control-grid .right {
-  grid-column: 4;
-  grid-row: 2;
-  background-color: var(--lcars-orange);
-  color: var(--lcars-black);
-  border: none;
-}
-
-.lcars-control-grid .down {
-  grid-column: 3;
-  grid-row: 3;
-  background-color: var(--lcars-orange);
-  color: var(--lcars-black);
-  border: none;
-}
-
-.lcars-control-grid .left {
-  grid-column: 2;
-  grid-row: 2;
-  background-color: var(--lcars-orange);
-  color: var(--lcars-black);
-  border: none;
-}
-
-/* Home button */
-.lcars-control-grid .home {
-  grid-column: 3;
-  grid-row: 2;
-  border-radius: 50%;
-  width: 80%;
-  height: 80%;
-  margin: auto;
-  background-color: var(--lcars-orange);
-  color: var(--lcars-black);
-  border: none;
-}
-
-/* Function buttons */
-.lcars-control-grid .function {
-  background-color: var(--lcars-panel);
-}
-
-/* Special buttons and positions */
-.lcars-control-grid .zoom-in {
-  grid-column: 4;
-  grid-row: 3;
-  background-color: var(--lcars-blue);
-  color: var(--lcars-black);
-  border: none;
-}
-
-.lcars-control-grid .zoom-out {
-  grid-column: 2;
-  grid-row: 3;
-  background-color: var(--lcars-blue);
-  color: var(--lcars-black);
-  border: none;
-}
-
-.lcars-control-grid .focus-near {
-  grid-column: 2;
-  grid-row: 1;
-  background-color: var(--lcars-blue);
-  color: var(--lcars-black);
-  border: none;
-}
-
-.lcars-control-grid .focus-far {
-  grid-column: 4;
-  grid-row: 1;
-  background-color: var(--lcars-blue);
-  color: var(--lcars-black);
-  border: none;
-}
-
-.lcars-control-grid .wiper {
-  grid-column: 5;
-  grid-row: 1;
-  background-color: var(--lcars-panel);
-  color: var(--lcars-orange);
-  border: 2px solid var(--lcars-orange);
-}
-
-.lcars-control-grid .osd {
-  grid-column: 5;
-  grid-row: 2;
-  background-color: var(--lcars-panel);
-  color: var(--lcars-orange);
-  border: 2px solid var(--lcars-orange);
-}
-
-.lcars-control-grid .thermal {
-  grid-column: 1;
-  grid-row: 1;
-  background-color: var(--lcars-panel);
-  color: var(--lcars-orange);
-  border: 2px solid var(--lcars-orange);
-}
-
-.lcars-control-grid .visible {
-  grid-column: 1;
-  grid-row: 2;
-  background-color: var(--lcars-panel);
-  color: var(--lcars-orange);
-  border: 2px solid var(--lcars-orange);
-}
-
-.lcars-control-grid .preset1 {
-  grid-column: 1;
-  grid-row: 3;
-  background-color: var(--lcars-panel);
-  color: var(--lcars-orange);
-  border: 2px solid var(--lcars-orange);
-}
-
-.lcars-control-grid .preset2 {
-  grid-column: 5;
-  grid-row: 3;
-  background-color: var(--lcars-panel);
-  color: var(--lcars-orange);
-  border: 2px solid var(--lcars-orange);
-}
-
-/* Remove unnecessary header style now that we've removed that element */
-.lcars-header-camera {
-  display: none;
-}
-
-/* Media control row - Match content width */
-.lcars-media-controls {
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  gap: 15px;
-  background-color: var(--lcars-bg-dark);
-  border-radius: 25px;
-  padding: 12px 20px;
-  margin: 15px auto;
-  width: 100%;
-  box-shadow: 0 3px 10px rgba(0,0,0,0.3);
-}
-
-.lcars-media-button {
-  width: 40px;
-  height: 40px;
-  background-color: var(--lcars-black);
-  border: none;
-  color: white;
-  font-size: 1.2rem;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 6px;
-}
-
-.lcars-media-button:hover {
-  background-color: rgba(255,255,255,0.1);
-}
-
-.lcars-media-button:active {
-  background-color: rgba(255,255,255,0.2);
-}
-
-/* Special grid spans */
-.lcars-grid-span-2 {
-  grid-column: span 2;
-}
-
-/* Circular buttons */
-.lcars-circle {
-  width: 70px;
-  height: 70px;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  font-size: 0.7rem;
-  text-align: center;
-  line-height: 1.2;
-}
-
-/* LCARS Asymmetric Blocks - Simplified */
-.lcars-column-block {
-  display: flex;
-  flex-direction: column;
-  width: 100%;
-}
-
-.lcars-multi-block {
-  display: flex;
-  margin-bottom: 8px;
-  width: 100%;
-  align-items: stretch;
-}
-
-/* L-shaped section block */
-.lcars-elbow-left {
-  width: 100%;
-  position: relative;
-  display: flex;
-  margin-bottom: 6px;
-}
-
-.lcars-elbow-left-inner {
-  position: relative;
-  height: 35px;
-  flex-grow: 1;
-  border-top-right-radius: var(--lcars-border-radius);
-  border-top-left-radius: 0;
-  border-bottom-left-radius: 0;
-  border-bottom-right-radius: 0;
-  display: flex;
-  align-items: center;
-  padding-left: 30px;
-  font-weight: bold;
-  font-size: 0.8rem;
-}
-
-.lcars-elbow-left-inner::after {
-  content: '';
+/* status strip fused to the frame's top edge */
+.status-strip {
   position: absolute;
-  width: 20px;
-  height: 35px;
-  background-color: var(--lcars-black);
   top: 0;
   left: 0;
-}
-
-.lcars-elbow-left-outer {
-  width: 25px;
-  height: 35px;
-  background-color: inherit;
-  border-top-left-radius: var(--lcars-border-radius);
-  border-bottom-left-radius: 0;
-  border-bottom-right-radius: 0;
-  border-top-right-radius: 0;
-  margin-right: -2px;
-  z-index: 1;
-}
-
-.lcars-elbow-left-connector {
-  width: 100%;
-  height: 6px;
-  background-color: inherit;
-  margin-top: -2px;
-}
-
-/* Vertical bar with text - simplified */
-.lcars-vertical-bar {
-  width: 35px;
-  margin-right: 6px;
-  background-color: inherit;
+  right: 0;
   display: flex;
-  flex-direction: column;
-  justify-content: space-around;
   align-items: center;
-  text-align: center;
-  border-radius: var(--lcars-small-radius);
-  padding: 6px 0;
-  flex-shrink: 0;
-  font-size: 0.7rem;
+  gap: 12px;
+  padding: 4px 10px;
+  background: rgba(0, 0, 0, 0.7);
+  color: var(--blue);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
 }
 
-/* Additional responsive adjustments for video container */
-@media (max-width: 768px) {
-  .lcars-video-container {
-    min-height: 400px;
-  }
-}
+.st-item { white-space: nowrap; }
+.st-spacer { flex: 1; }
+.st-clock { font-variant-numeric: tabular-nums; }
+.st-item.bad { color: var(--red); }
 
-@media (max-width: 480px) {
-  .lcars-video-container {
-    min-height: 300px;
-  }
-}
-
-/* Responsive adjustments - Updated for full-width layout and better header display */
-@media (max-width: 1024px) {
-  .lcars-layout {
-    grid-template-columns: 1fr;
-    grid-template-rows: 60px auto;
-    grid-template-areas:
-      "header"
-      "main";
-  }
-  
-  .lcars-panel-left,
-  .lcars-panel-right {
-    display: none; /* Hide panels on small screens */
-  }
-  
-  .lcars-title {
-    font-size: 1.2rem;
-  }
-  
-  #clock {
-    font-size: 0.9rem;
-  }
-  
-  .lcars-video-container {
-    min-height: 350px;
-  }
-  
-  .lcars-control-grid button {
-    min-height: 60px;
-    font-size: 0.9rem;
-  }
-}
-
-@media (max-width: 768px) {
-  .lcars-header-primary {
-    width: 100px;
-    font-size: 0.9rem;
-  }
-  
-  .lcars-header-elbow {
-    left: 100px;
-  }
-  
-  .lcars-header-separator {
-    width: 20px;
-  }
-  
-  .lcars-video-container {
-    min-height: 350px;
-  }
-  
-  .lcars-control-grid button {
-    min-height: 60px;
-    font-size: 0.9rem;
-  }
-}
-
-@media (max-width: 480px) {
-  .lcars-header-primary {
-    width: 80px;
-    font-size: 0.8rem;
-  }
-  
-  .lcars-header-elbow {
-    left: 80px;
-    width: 20px;
-  }
-  
-  .lcars-title {
-    font-size: 1rem;
-  }
-  
-  #clock {
-    font-size: 0.8rem;
-  }
-  
-  .lcars-video-container {
-    min-height: 250px;
-  }
-}
-
-/* Divider line */
-.lcars-divider {
-  height: 5px;
-  margin: 15px 0;
-  border-radius: var(--lcars-small-radius);
-}
-
-/* Preset panel with angled corners */
-.lcars-preset-panel {
-  background-color: var(--lcars-bg-dark);
-  border-radius: var(--lcars-small-radius);
-  padding: 12px;
-  margin-top: 8px;
-  position: relative;
-  border: 2px solid var(--lcars-orange);
-}
-
-/* Corner cutouts for preset panel */
-.lcars-preset-panel::before {
-  content: '';
-  position: absolute;
-  top: -2px;
-  left: -2px;
-  width: 15px;
-  height: 15px;
-  background-color: var(--lcars-black);
-  border-bottom-right-radius: var(--lcars-small-radius);
-  border-top: 2px solid var(--lcars-orange);
-  border-left: 2px solid var(--lcars-orange);
-}
-
-.lcars-preset-panel::after {
-  content: '';
-  position: absolute;
-  bottom: -2px;
-  right: -2px;
-  width: 15px;
-  height: 15px;
-  background-color: var(--lcars-black);
-  border-top-left-radius: var(--lcars-small-radius);
-  border-bottom: 2px solid var(--lcars-orange);
-  border-right: 2px solid var(--lcars-orange);
-}
-
-/* Indicator light */
-.lcars-indicator {
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  background-color: var(--lcars-black);
+.st-dot {
   display: inline-block;
-  margin-right: 8px;
-  border: 1px solid var(--lcars-black);
-  transition: all 0.3s ease;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--panel);
+  border: 1px solid var(--blue);
+  margin-right: 5px;
+  vertical-align: 1px;
 }
 
-.lcars-indicator.active {
-  background-color: var(--lcars-orange);
-  box-shadow: 0 0 8px var(--lcars-orange);
+.st-dot.live {
+  background: var(--red);
+  border-color: var(--red);
   animation: pulse 1.5s infinite alternate;
 }
 
-@keyframes pulse {
-  from { opacity: 0.7; }
-  to { opacity: 1; }
+.st-flash, #st-flash {
+  opacity: 0;
+  transition: opacity 0.2s;
+  color: var(--blue);
+}
+#st-flash.show { opacity: 1; }
+#st-flash.bad { color: var(--red); }
+
+@keyframes pulse { from { opacity: 0.55; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .st-dot.live { animation: none; }
 }
 
-/* Segmented blocks for simplified interface */
-.lcars-segmented-block {
-  display: flex;
-  width: 100%;
-  margin-bottom: 8px;
-}
-
-.lcars-segment {
-  height: 30px;
-  background-color: inherit;
-  display: flex;
-  align-items: center;
-  padding: 0 10px;
-  margin-right: 6px;
-  border-radius: var(--lcars-small-radius);
-  font-weight: bold;
-  font-size: 0.8rem;
-  text-align: left;
-  padding-left: 12px;
-}
-
-.lcars-segment:last-child {
-  margin-right: 0;
-  flex-grow: 1;
-}
-
-.lcars-segment-tall {
-  height: 40px;
-}
-
-.lcars-segment-short {
-  width: 30px;
-  padding: 0;
-  display: flex;
-  justify-content: center;
-}
-
-/* Circular buttons */
-.lcars-circle {
-  width: 70px;
-  height: 70px;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  font-size: 0.7rem;
-  text-align: center;
-  line-height: 1.2;
-}
-
-/* LCARS Asymmetric Blocks - Simplified */
-.lcars-column-block {
-  display: flex;
-  flex-direction: column;
-  width: 100%;
-}
-
-.lcars-multi-block {
-  display: flex;
-  margin-bottom: 8px;
-  width: 100%;
-  align-items: stretch;
-}
-
-/* L-shaped section block */
-.lcars-elbow-left {
-  width: 100%;
-  position: relative;
-  display: flex;
-  margin-bottom: 6px;
-}
-
-.lcars-elbow-left-inner {
-  position: relative;
-  height: 35px;
-  flex-grow: 1;
-  border-top-right-radius: var(--lcars-border-radius);
-  border-top-left-radius: 0;
-  border-bottom-left-radius: 0;
-  border-bottom-right-radius: 0;
-  display: flex;
-  align-items: center;
-  padding-left: 30px;
-  font-weight: bold;
-  font-size: 0.8rem;
-}
-
-.lcars-elbow-left-inner::after {
-  content: '';
+.osd-banner {
   position: absolute;
-  width: 20px;
-  height: 35px;
-  background-color: var(--lcars-black);
-  top: 0;
+  bottom: 0;
   left: 0;
+  right: 0;
+  padding: 5px 10px;
+  background: rgba(0, 0, 0, 0.75);
+  color: var(--orange);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-align: center;
 }
 
-.lcars-elbow-left-outer {
-  width: 25px;
-  height: 35px;
-  background-color: inherit;
-  border-top-left-radius: var(--lcars-border-radius);
-  border-bottom-left-radius: 0;
-  border-bottom-right-radius: 0;
-  border-top-right-radius: 0;
-  margin-right: -2px;
-  z-index: 1;
+.fs-btn {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  width: var(--tap);
+  height: var(--tap);
+  border: 1px solid var(--orange);
+  border-radius: var(--r-sm);
+  background: rgba(0, 0, 0, 0.55);
+  color: var(--orange);
+  font-size: 1.15rem;
 }
 
-.lcars-elbow-left-connector {
-  width: 100%;
-  height: 6px;
-  background-color: inherit;
-  margin-top: -2px;
+/* -------------------------------------------------------------- sections -- */
+.rail-sec {
+  background: var(--panel-2);
+  border-radius: var(--r-md);
+  padding: 10px 12px 12px;
 }
 
-/* Vertical bar with text - simplified */
-.lcars-vertical-bar {
-  width: 35px;
-  margin-right: 6px;
-  background-color: inherit;
+.sec-title {
+  margin: 0 0 10px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  color: var(--orange);
+  border-bottom: 1px solid var(--orange-dim);
+  padding-bottom: 5px;
+}
+
+.hint {
+  margin: 10px 2px 0;
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  color: #9a9a9a;
+  font-family: Arial, sans-serif;
+}
+
+/* ----------------------------------------------------------------- D-pad -- */
+.motion-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  flex-wrap: wrap;      /* rockers drop below the pad when width is tight */
+}
+
+.dpad-wrap { flex: 0 0 auto; }
+
+#dpad {
+  width: min(46vw, 210px);
+  height: auto;
+  display: block;
+  touch-action: none;               /* the pad IS the gesture surface */
+  outline-offset: 3px;
+}
+
+#dpad:focus-visible { outline: 2px solid var(--blue); }
+
+.dpad-ring { fill: none; stroke: var(--orange); stroke-width: 4; }
+.dpad-face { fill: var(--panel); }
+.dpad-arrow { fill: var(--orange-dim); transition: fill 0.1s; }
+.dpad-arrow.on { fill: var(--blue); }
+.dpad-stop { fill: var(--black); stroke: var(--orange); stroke-width: 2; }
+.dpad-stop.on { stroke: var(--blue); }
+.dpad-stop-label {
+  fill: var(--orange);
+  font-family: var(--font);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  pointer-events: none;
+}
+
+.rockers {
+  display: flex;
+  gap: 10px;
+}
+
+.rocker {
   display: flex;
   flex-direction: column;
-  justify-content: space-around;
-  align-items: center;
-  text-align: center;
-  border-radius: var(--lcars-small-radius);
-  padding: 6px 0;
-  flex-shrink: 0;
-  font-size: 0.7rem;
+  gap: 8px;
 }
-/* Touch behaviour for the control buttons.
-   Without these, a long press on a phone selects the button's label or opens
-   the iOS callout menu instead of holding the button down - which is what a
-   press-and-hold PTZ control needs to do. touch-action: manipulation also
-   drops the 300ms double-tap-zoom delay. */
-.lcars-control-grid button,
-.lcars-media-button {
+
+/* -------------------------------------------------------------- controls -- */
+.hold-btn, .pill, .chip, .seg button, .tabs button, .speed-seg button {
+  min-height: var(--tap);
+  min-width: var(--tap);
+  border: 2px solid var(--orange);
+  border-radius: var(--r-md);
+  background: var(--panel);
+  color: var(--orange);
+  font-weight: 700;
+  font-size: 0.85rem;
+  padding: 0 14px;
   -webkit-user-select: none;
   user-select: none;
   -webkit-touch-callout: none;
@@ -953,75 +377,238 @@ body {
   touch-action: manipulation;
 }
 
-/* Visible feedback while a direction is held, since :active is unreliable
-   once the pointer is captured. */
-.lcars-control-grid button.is-held {
-  filter: brightness(0.8);
-  transform: translateY(1px);
+.hold-btn.is-held, .pill:active, .chip:active {
+  background: var(--orange);
+  color: var(--black);
 }
 
-/* Header fit on narrow screens.
-   The full header needs about 387px - LCARS block 80, separator 20, title
-   129, a 19-character timestamp 118, plus 40 of padding. A 390px phone has
-   370 available and a 375px one has 355, so the excess was silently clipped
-   by body{overflow-x:hidden}. Drop the date, tighten the padding, and let the
-   title ellipsis rather than push its neighbours out of the viewport. */
-@media (max-width: 480px) {
-  #clock .clock-date {
-    display: none;
-  }
-
-  .lcars-header-secondary {
-    padding: 0 10px;
-    min-width: 0;
-  }
-
-  .lcars-title {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  #clock {
-    flex-shrink: 0;
-    white-space: nowrap;
-  }
+.pill.active { background: var(--orange); color: var(--black); }
+.pill-accent { border-color: var(--blue); color: var(--blue); }
+.pill-danger { border-color: var(--red); color: var(--red); }
+.pill-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
 }
 
-/* Preset number box - previously an inline style attribute, moved here so the
-   narrow-screen rules below can change its width without !important. */
-.lcars-preset-input {
-  width: 50px;
-  background: var(--lcars-bg-dark);
-  color: var(--lcars-text);
-  border: 1px solid var(--lcars-orange);
-  border-radius: 4px;
+.pill[disabled] {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.quick-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.seg {
+  display: inline-flex;
+  border: 2px solid var(--orange);
+  border-radius: var(--r-md);
+  overflow: hidden;
+}
+
+.seg button {
+  border: none;
+  border-radius: 0;
+  min-width: 64px;
+}
+
+.seg button + button { border-left: 2px solid var(--orange); }
+.seg button.active { background: var(--orange); color: var(--black); }
+
+.speed-seg {
+  margin-top: 12px;
+  display: flex;
+  border: 2px solid var(--orange);
+  border-radius: var(--r-md);
+  overflow: hidden;
+}
+
+.speed-seg button {
+  flex: 1;
+  border: none;
+  border-radius: 0;
+}
+
+.speed-seg button + button { border-left: 2px solid var(--orange); }
+.speed-seg button.active { background: var(--orange); color: var(--black); }
+
+/* ------------------------------------------------------------------ tabs -- */
+.tabs {
+  display: flex;
+  gap: 8px;
+}
+
+.tabs button {
+  flex: 1;
+  background: var(--panel-2);
+}
+
+.tabs button.active { background: var(--orange); color: var(--black); }
+
+.tabpane { display: none; }
+.tabpane.active { display: block; }
+
+/* --------------------------------------------------------------- presets -- */
+.chip-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+.chip { padding: 0 12px; }
+.chip-go { border-color: var(--blue); color: var(--blue); }
+.chip-set { background: var(--orange); color: var(--black); }
+
+.preset-input {
+  width: 58px;
+  min-height: var(--tap);
+  background: var(--panel);
+  color: var(--text);
+  border: 2px solid var(--orange);
+  border-radius: var(--r-md);
   text-align: center;
-  padding: 5px;
+  font-family: var(--font);
+  font-size: 1rem;
 }
 
-/* Bottom bar fit on narrow screens.
-   Six 40px buttons plus a 50px input, six 15px gaps and 40px of padding come
-   to 420px of intrinsic width. A Galaxy S24 is 360 CSS px, leaving 340 - so
-   this bar, not the button grid, was what still forced the page wider than
-   the screen. Tighten it and let it wrap, which fits at any width rather than
-   at one we happened to measure. */
-@media (max-width: 480px) {
-  .lcars-media-controls {
-    flex-wrap: wrap;
-    justify-content: flex-start;
-    gap: 8px;
-    padding: 10px 12px;
-  }
+/* ---------------------------------------------------------------- system -- */
+.sys-stats {
+  margin: 0;
+  font-size: 0.82rem;
+}
 
-  .lcars-media-button {
-    width: 38px;
-    height: 38px;
-    font-size: 1rem;
-  }
+.sys-stats div {
+  display: flex;
+  justify-content: space-between;
+  padding: 4px 2px;
+  border-bottom: 1px solid #222;
+}
 
-  .lcars-preset-input {
-    width: 44px;
-  }
+.sys-stats dt { color: var(--blue); font-weight: 700; letter-spacing: 0.08em; }
+.sys-stats dd { margin: 0; font-variant-numeric: tabular-nums; }
+
+/* ----------------------------------------------------------------- login -- */
+.login-wrap {
+  flex: 1;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 2rem 1rem;
+}
+
+.login-panel {
+  display: flex;
+  width: 100%;
+  max-width: 30rem;
+  background: var(--black);
+  border-radius: 0 var(--r-lg) var(--r-lg) 0;
+  overflow: hidden;
+}
+
+.login-bar { flex: 0 0 2rem; background: var(--orange); }
+.login-body { flex: 1; padding: 1.5rem; }
+
+.login-title {
+  color: var(--orange);
+  letter-spacing: 0.1em;
+  font-size: 1.25rem;
+  margin: 0 0 1.25rem;
+}
+
+.login-label {
+  display: block;
+  color: var(--blue);
+  letter-spacing: 0.08em;
+  font-size: 0.8rem;
+  margin: 0.75rem 0 0.25rem;
+}
+
+.login-input {
+  width: 100%;
+  padding: 0.6rem 0.75rem;
+  border: none;
+  border-radius: 0.75rem;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 1rem;
+}
+
+.login-input:focus { outline: 2px solid var(--orange); }
+
+.login-button {
+  margin-top: 1.5rem;
+  width: 100%;
+  padding: 0.7rem;
+  border: none;
+  border-radius: 1.25rem;
+  background: var(--orange);
+  color: var(--black);
+  font-weight: 700;
+  letter-spacing: 0.1em;
+}
+
+.login-error {
+  background: var(--red);
+  color: var(--black);
+  padding: 0.6rem 0.85rem;
+  border-radius: 0.75rem;
+  font-size: 0.9rem;
+  margin-bottom: 0.5rem;
+}
+
+/* --------------------------------------------------------------- archive -- */
+.rec-wrap {
+  flex: 1;
+  padding: var(--pad);
+  max-width: 900px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+.rec-head { margin-bottom: 14px; }
+.rec-meta { color: var(--blue); font-size: 0.85rem; margin: 6px 0 12px; }
+
+.rec-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.rec-table th {
+  text-align: left;
+  color: var(--orange);
+  letter-spacing: 0.12em;
+  font-size: 0.75rem;
+  border-bottom: 2px solid var(--orange);
+  padding: 6px 8px;
+}
+
+.rec-table td {
+  padding: 8px;
+  border-bottom: 1px solid #222;
+}
+
+.rec-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+.rec-table .mono { font-family: monospace; font-size: 0.85rem; }
+
+.rec-live {
+  color: var(--red);
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  margin-left: 8px;
+}
+
+.rec-table .chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 36px;
+  text-decoration: none;
+  font-size: 0.75rem;
 }

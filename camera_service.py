@@ -33,7 +33,7 @@ from pathlib import Path
 import paho.mqtt.client as mqtt
 import serial
 from flask import (Flask, Response, jsonify, make_response, redirect,
-                   render_template, request, url_for)
+                   render_template, request, send_from_directory, url_for)
 from flask_login import (LoginManager, UserMixin, current_user, login_required,
                          login_user, logout_user)
 from werkzeug.security import check_password_hash
@@ -214,6 +214,11 @@ class FrameBuffer:
             if self._frame is None or self._seq <= last_seq:
                 return None
             return self._seq, self._frame
+
+    def latest(self) -> bytes | None:
+        """The most recent frame without waiting, or None before first frame."""
+        with self._cond:
+            return self._frame
 
     @property
     def seq(self) -> int:
@@ -570,6 +575,14 @@ class PTZ:
 # PTZ command vocabulary - one source of truth for both HTTP and MQTT
 # ---------------------------------------------------------------------------
 # action -> (pelcoD method, fixed arguments)
+#
+# The aux and tour numbers are VERIFIED on this physical camera and must
+# never be renumbered. Aux assignments are remappable in the camera's own
+# Pelco AUX Setup menu: this unit's aux 2 (OSD open) is a local remap - the
+# factory-documented opener is Set Preset 95 - and the imager toggle is
+# documented at aux 5 on factory defaults but lives at aux 4 here. A factory
+# reset of the camera would move both; the fallbacks are documented in
+# pelcoD.openmenu() and the deploy README, but the live numbers stay.
 PTZ_ACTIONS = {
     "pan_left":             ("panleft",    (PTZ_SPEED,)),
     "pan_right":            ("panright",   (PTZ_SPEED,)),
@@ -580,16 +593,37 @@ PTZ_ACTIONS = {
     "zoom_wide":            ("zoomwide",   ()),
     "focus_near":           ("focusnear",  ()),
     "focus_far":            ("focusfar",   ()),
+    "iris_open":            ("irisopen",   ()),
+    "iris_close":           ("irisclose",  ()),
     "osd_menu":             ("auxon",      (2,)),
     "thermal_camera":       ("auxon",      (4,)),
     "visible_light_camera": ("auxoff",     (4,)),
     "windshield_wiper":     ("auxon",      (1,)),
+    "wiper_off":            ("auxoff",     (1,)),
     "tour_1":               ("gotopreset", (81,)),
     "tour_2":               ("gotopreset", (82,)),
 }
 
+# Motion actions whose first argument is a speed the client may override.
+PTZ_SPEED_ACTIONS = {"pan_left", "pan_right", "tilt_up", "tilt_down"}
+
 # Actions that take a preset number rather than fixed arguments.
-PTZ_PRESET_ACTIONS = {"set_preset": "setpreset", "goto_preset": "gotopreset"}
+PTZ_PRESET_ACTIONS = {"set_preset": "setpreset", "goto_preset": "gotopreset",
+                      "clear_preset": "clearpreset"}
+
+# Preset numbers a user may store scenes in. Everything else is refused:
+# 33/34 trigger flip/home actions, 62 is the washer nozzle position, and
+# 80-99 is the Bosch special band - 81/82 run the tours (verified), 92/93
+# WRITE the AutoScan pan limits, 95 opens the setup menu, and 97 is
+# FastAddress, which re-addresses the camera on the bus. The tours stay
+# reachable as named actions; raw numbers in these bands never pass.
+RESERVED_PRESETS = frozenset({33, 34, 62}) | frozenset(range(80, 100))
+PRESET_MAX = 79
+
+
+def preset_allowed(preset: int) -> bool:
+    return 1 <= preset <= PRESET_MAX and preset not in RESERVED_PRESETS
+
 
 # The URLs the shipped web UI already calls, mapped onto the actions above.
 # Keys must not change - templates/index.html posts to these exact paths.
@@ -603,30 +637,71 @@ HTTP_PTZ_ROUTES = {
     "/zoom_wide": "zoom_wide",
     "/focus_near": "focus_near",
     "/focus_far": "focus_far",
+    "/iris_open": "iris_open",
+    "/iris_close": "iris_close",
     "/OSD_menu": "osd_menu",
     "/Thermal_Camera": "thermal_camera",
     "/Visible_Light_Camera": "visible_light_camera",
     "/Windshield_Wiper": "windshield_wiper",
+    "/Wiper_Off": "wiper_off",
     "/Tour_1": "tour_1",
     "/Tour_2": "tour_2",
 }
 
+# Last imager we COMMANDED. RS-485 is one-way - there is no readback - so
+# this is an assumption, not ground truth: MQTT or a camera-side change can
+# move the real state behind our back, and a service restart forgets it.
+# The UI is told exactly that.
+imager_state = "unknown"
 
-def execute_ptz(action: str, preset: int | None = None) -> tuple[bool, str]:
+
+def execute_ptz(action: str, preset: int | None = None,
+                speed: int | None = None) -> tuple[bool, str]:
     """Run one PTZ action. Returns (ok, error message)."""
+    global imager_state
     if ptz is None:
         return False, "no serial link"
     if action in PTZ_PRESET_ACTIONS:
         if preset is None:
             return False, "preset number required"
-        if not 1 <= preset <= 255:
-            return False, "preset out of range"
+        if not preset_allowed(preset):
+            return False, "reserved preset"
         return ptz.send(PTZ_PRESET_ACTIONS[action], preset), ""
     entry = PTZ_ACTIONS.get(action)
     if entry is None:
         return False, f"unknown action '{action}'"
     method, args = entry
-    return ptz.send(method, *args), ""
+    if action in PTZ_SPEED_ACTIONS and speed is not None:
+        args = (max(1, min(63, int(speed))),)
+    ok = ptz.send(method, *args)
+    if ok and action == "thermal_camera":
+        imager_state = "thermal"
+    elif ok and action == "visible_light_camera":
+        imager_state = "visible"
+    return ok, ""
+
+
+# Diagonal (combined pan+tilt) frames are spec-confirmed but have never been
+# sent to this camera. Until one bench test passes, /move requests with both
+# axes active are served by the dominant axis alone.
+DIAGONALS_ENABLED = _env("DIAGONALS_ENABLED", "0").lower() in ("1", "true", "yes")
+
+
+def execute_move(pan: int, tilt: int, pan_speed: int, tilt_speed: int) -> tuple[bool, str]:
+    """Combined-axis motion for the D-pad. pan/tilt in -1/0/1."""
+    if ptz is None:
+        return False, "no serial link"
+    pan = max(-1, min(1, int(pan)))
+    tilt = max(-1, min(1, int(tilt)))
+    pan_speed = max(1, min(63, int(pan_speed)))
+    tilt_speed = max(1, min(63, int(tilt_speed)))
+    if pan and tilt and not DIAGONALS_ENABLED:
+        # Dominant axis: larger speed wins, tie goes to pan.
+        if tilt_speed > pan_speed:
+            pan = 0
+        else:
+            tilt = 0
+    return ptz.send("move", pan, tilt, pan_speed, tilt_speed), ""
 
 
 # ---------------------------------------------------------------------------
@@ -718,13 +793,14 @@ def _clear_failures(addr: str) -> None:
 def security_headers(response):
     """Baseline hardening.
 
-    Deliberately no HSTS: the certificate is self-signed, and once a browser
-    pins HSTS it refuses to let you click through the trust warning - that
-    would lock you out of your own camera.
+    Deliberately no HSTS: with a certificate problem, a pinned HSTS policy
+    removes the browser's "proceed anyway" option and locks you out of your
+    own camera.
 
-    'unsafe-inline' is needed because base.html and index.html carry inline
-    <style> and <script> blocks. Everything else is 'self' now that Bootstrap,
-    jQuery and the font are served locally.
+    No 'unsafe-inline' anywhere: every template loads styles from lcars.css
+    and behaviour from static/js/main.js, with zero inline handlers or style
+    attributes. Scripts and styles that are not ours cannot run even if
+    markup injection is ever found.
     """
     if not request.path.startswith("/static/"):
         response.headers.setdefault("Cache-Control", "no-store")
@@ -734,7 +810,7 @@ def security_headers(response):
     response.headers.setdefault(
         "Content-Security-Policy",
         "default-src 'self'; img-src 'self' data:; "
-        "style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; "
+        "style-src 'self'; script-src 'self'; "
         "font-src 'self'; connect-src 'self'; frame-ancestors 'none'; "
         "base-uri 'none'; form-action 'self'",
     )
@@ -795,7 +871,12 @@ def logout():
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    return render_template(
+        "index.html",
+        diagonals=DIAGONALS_ENABLED,
+        default_speed=PTZ_SPEED,
+        auth_enabled=AUTH_ENABLED,
+    )
 
 
 @app.route("/camera")
@@ -818,7 +899,13 @@ def _register_ptz_routes() -> None:
     """Expose every PTZ action at the URL the existing web UI already uses."""
     for rule, action in HTTP_PTZ_ROUTES.items():
         def view(action=action):
-            ok, err = execute_ptz(action)
+            payload = request.get_json(silent=True) or {}
+            speed = payload.get("speed") if isinstance(payload, dict) else None
+            try:
+                speed = int(speed) if speed is not None else None
+            except (TypeError, ValueError):
+                speed = None
+            ok, err = execute_ptz(action, speed=speed)
             return make_response(
                 jsonify({"ok": ok, "action": action, "error": err}), 200
             )
@@ -827,6 +914,25 @@ def _register_ptz_routes() -> None:
 
 
 _register_ptz_routes()
+
+
+@app.route("/move", methods=["POST"])
+def move():
+    """Combined-axis motion for the D-pad.
+
+    {"pan": -1|0|1, "tilt": -1|0|1, "panSpeed": 1-63, "tiltSpeed": 1-63}
+    Both axes zero is a stop.
+    """
+    p = request.get_json(silent=True) or {}
+    try:
+        pan = int(p.get("pan", 0))
+        tilt = int(p.get("tilt", 0))
+        pan_speed = int(p.get("panSpeed", PTZ_SPEED))
+        tilt_speed = int(p.get("tiltSpeed", PTZ_SPEED))
+    except (TypeError, ValueError):
+        return make_response(jsonify({"ok": False, "error": "bad payload"}), 400)
+    ok, err = execute_move(pan, tilt, pan_speed, tilt_speed)
+    return make_response(jsonify({"ok": ok, "error": err}), 200)
 
 
 @app.route("/Set_preset", methods=["POST"])
@@ -839,10 +945,17 @@ def goto_preset():
     return _preset("goto_preset")
 
 
+@app.route("/Clear_preset", methods=["POST"])
+def clear_preset():
+    return _preset("clear_preset")
+
+
 def _preset(action: str):
     payload = request.get_json(silent=True) or {}
+    # "preset" is the current name; "flabber" is accepted for the old UI.
+    raw = payload.get("preset", payload.get("flabber"))
     try:
-        number = int(payload.get("flabber"))
+        number = int(raw)
     except (TypeError, ValueError):
         return make_response(jsonify({"ok": False, "error": "bad preset"}), 400)
     ok, err = execute_ptz(action, number)
@@ -850,6 +963,60 @@ def _preset(action: str):
     return make_response(
         jsonify({"ok": ok, "preset": number, "error": err}), status
     )
+
+
+@app.route("/snapshot")
+def snapshot():
+    """The latest preview frame as a downloadable JPEG.
+
+    Preview resolution (640 wide) with the timestamp already burned in -
+    drawtext runs before ffmpeg's split, so every path carries it.
+    """
+    jpeg = frames.latest()
+    if jpeg is None:
+        return make_response(jsonify({"ok": False, "error": "no frame yet"}), 503)
+    resp = make_response(jpeg)
+    resp.headers["Content-Type"] = "image/jpeg"
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    resp.headers["Content-Disposition"] = f'attachment; filename="cam-{stamp}.jpg"'
+    return resp
+
+
+def _recording_entries() -> list[dict]:
+    entries = []
+    for path in sorted(VIDEO_DIR.glob(f"*.{RECORD_EXT}"), reverse=True):
+        day = day_of(path)
+        if day is None:
+            continue
+        size = path.stat().st_size
+        entries.append({
+            "name": path.name,
+            "day": day.isoformat(),
+            "size_gb": round(size / 2**30, 2),
+            "growing": day == date.today() and not path.name.count("part"),
+        })
+    return entries
+
+
+@app.route("/recordings")
+def recordings():
+    entries = _recording_entries()
+    return render_template(
+        "recordings.html",
+        entries=entries,
+        total_gb=round(sum(e["size_gb"] for e in entries), 1),
+        free_gb=round(shutil.disk_usage(VIDEO_DIR).free / 2**30, 1),
+        retention_days=RETENTION_DAYS,
+    )
+
+
+@app.route("/recordings/<name>")
+def recording_file(name: str):
+    # Only names the glob actually produced - user input never touches a path.
+    if not any(e["name"] == name for e in _recording_entries()):
+        return make_response(jsonify({"ok": False, "error": "no such recording"}), 404)
+    return send_from_directory(VIDEO_DIR, name, as_attachment=True,
+                               conditional=True)
 
 
 @app.route("/Start_New_File", methods=["POST"])
@@ -889,6 +1056,12 @@ def current_state() -> dict:
         "current_size_gb": round(current.stat().st_size / 2**30, 2) if exists else 0,
         "free_gb": round(shutil.disk_usage(VIDEO_DIR).free / 2**30, 1),
         "retention_days": RETENTION_DAYS,
+        # Last COMMANDED imager - RS-485 has no readback, so this is an
+        # assumption the UI must present as such, never as ground truth.
+        "imager": imager_state,
+        "archive_gb": round(sum(
+            f.stat().st_size for f in VIDEO_DIR.glob(f"*.{RECORD_EXT}")
+        ) / 2**30, 1),
     }
 
 
@@ -960,14 +1133,24 @@ class MqttBridge:
     def _on_message(self, client, userdata, msg):
         try:
             raw = msg.payload.decode("utf-8", "replace").strip()
+            speed = None
             if raw.startswith("{"):
                 payload = json.loads(raw)
                 action = str(payload.get("action", ""))
                 preset = payload.get("preset")
                 preset = int(preset) if preset is not None else None
+                speed = payload.get("speed")
+                speed = int(speed) if speed is not None else None
             else:
                 action, preset = raw, None      # bare action string also works
-            ok, err = execute_ptz(action, preset)
+            if action == "move" and raw.startswith("{"):
+                ok, err = execute_move(
+                    int(payload.get("pan", 0)), int(payload.get("tilt", 0)),
+                    int(payload.get("panSpeed", PTZ_SPEED)),
+                    int(payload.get("tiltSpeed", PTZ_SPEED)),
+                )
+            else:
+                ok, err = execute_ptz(action, preset, speed)
             if not ok:
                 log.warning("MQTT PTZ '%s' rejected: %s",
                             action, err or "serial write failed")

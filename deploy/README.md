@@ -365,6 +365,40 @@ mosquitto_sub -h 127.0.0.1 -u camera -P '<password>' -t 'camera/#' -v
 
 ---
 
+## The camera itself: verified, confirmed, gated
+
+The MIC 612 is driven blind - RS-485 is one-way, nothing is ever read back -
+so what we "know" about it comes in three grades, and the code enforces the
+difference.
+
+**Verified live on this unit** (never renumber): wiper = aux 1, OSD open =
+aux 2, thermal = aux 4 on, visible = aux 4 off, tour 1/2 = presets 81/82.
+Aux numbers are remappable in the camera's own Pelco AUX menu and two of
+ours are local remaps (factory docs put the imager toggle on aux 5 and the
+menu on Set-Preset 95) - a factory reset of the camera would move them.
+
+**Reserved preset bands the server refuses** (HTTP and MQTT alike): 33/34
+(flip/home actions), 62 (washer nozzle), 80-99 (Bosch special band - 92/93
+WRITE the AutoScan limits, 95 opens the menu, 97 re-addresses the camera on
+the bus). User scenes live in 1-32, 35-61, 63-79.
+
+**Gated pending a bench test** - each is one watched command with the camera
+on the bench:
+
+1. One diagonal `/move` (e.g. up-right) -> then set `DIAGONALS_ENABLED=1`
+   in /etc/camera-service.env to turn the D-pad from 4-way into 8-way.
+2. `goto preset 34` then `33` -> then enable the HOME and FLIP buttons in
+   templates/index.html (they ship disabled).
+3. A single-direction hold longer than 20 s -> confirms whether the Pelco
+   runaway-protect timeout exists here (the client already re-sends every
+   4 s, harmless either way).
+
+**Never send**: preset 97 (FastAddress), presets 92/93 (limit writes),
+opcode 0x49 (azimuth-zero calibration write), opcode 0x29 (factory reset),
+turbo speed 0x40. pelcoD.py deliberately cannot build the last three.
+
+---
+
 ## Things that cost time to work out
 
 Recorded so they do not have to be rediscovered.
