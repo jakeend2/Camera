@@ -45,7 +45,11 @@ from pelcoD import pelcoD
 # ---------------------------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent
 
-VIDEO_DEVICE = "/dev/video0"
+# Addressed by the stable by-id link, not by index. /dev/videoN numbering is
+# assigned in probe order, so a kernel upgrade or an extra capture device can
+# move it - and the bcm2835 codec nodes already occupy video10-video23.
+VIDEO_DEVICE = "/dev/v4l/by-id/usb-MACROSILICON_usb_video-video-index0"
+VIDEO_DEVICE_FALLBACK = "/dev/video0"
 CAPTURE_SIZE = "1280x720"
 # The capture dongle only offers discrete rates (5/10/20/25/30). Asking for an
 # unsupported rate silently gets you the next one up - 15 yields 20.
@@ -259,6 +263,16 @@ class Recorder:
             f"[prv]fps={PREVIEW_FPS},scale={PREVIEW_WIDTH}:-2[prvout]"
         )
 
+    @staticmethod
+    def _video_device() -> str:
+        """Prefer the stable by-id link; fall back to the raw node loudly."""
+        if Path(VIDEO_DEVICE).exists():
+            return VIDEO_DEVICE
+        log.warning("%s missing - falling back to %s. Confirm this is the "
+                    "capture dongle and not another video node.",
+                    VIDEO_DEVICE, VIDEO_DEVICE_FALLBACK)
+        return VIDEO_DEVICE_FALLBACK
+
     def _cmd(self) -> list[str]:
         # stdin stays open on purpose: writing 'q' is the only way to make
         # ffmpeg close its output files cleanly. SIGTERM makes it exit at once.
@@ -266,7 +280,7 @@ class Recorder:
             "ffmpeg", "-hide_banner", "-loglevel", "warning",
             "-f", "v4l2", "-input_format", "mjpeg",
             "-video_size", CAPTURE_SIZE, "-framerate", str(CAPTURE_FPS),
-            "-i", VIDEO_DEVICE,
+            "-i", self._video_device(),
             "-filter_complex", self._filter_complex(),
             # One file per calendar day, cut exactly at local midnight.
             "-map", "[recout]",

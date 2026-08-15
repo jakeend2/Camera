@@ -7,7 +7,7 @@
 set -euo pipefail
 
 ENV=/etc/camera-service.env
-VENV=/home/pi/Desktop/Camera/venv/bin/python
+VENV=/opt/camera/venv/bin/python
 
 read -rsp "New password: " p1; echo
 read -rsp "Confirm:      " p2; echo
