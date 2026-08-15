@@ -40,6 +40,32 @@ The project lives in `/opt`, not a home directory, because `/home/pi` is mode
 
 ---
 
+## Quick path: the installer
+
+For a fresh machine, `install.sh` does steps 1-6 below in one go - packages,
+service account, venv, credentials, TLS, broker, systemd - detecting the
+capture dongle, serial adapter and LAN subnet rather than assuming them.
+
+```bash
+sudo git clone https://github.com/jakeend2/Camera.git /opt/camera
+sudo /opt/camera/deploy/install.sh
+```
+
+It is safe to re-run: every step checks whether it is already done, and
+**existing credentials are never regenerated**, so a second run cannot lock
+you out of a working install. `--dry-run` reports what it would change
+without touching anything.
+
+It deliberately leaves out the firewall and sudo hardening - both can strand
+you on a headless machine - and dynamic DNS and WireGuard, which need an
+external account and router access. Those are steps 7-9 and the hardening
+section, still done by hand.
+
+The manual steps below remain the reference for what the installer does, and
+for anything you need to redo piecemeal.
+
+---
+
 ## Order of operations
 
 Steps 1–6 are the base system. Steps 7–9 add remote access and are optional

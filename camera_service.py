@@ -45,21 +45,42 @@ from pelcoD import pelcoD
 # ---------------------------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent
 
+def _env(name: str, default: str) -> str:
+    """Read a setting from the environment, falling back to the default.
+
+    Host-specific values - which capture dongle, which serial adapter - are
+    written to /etc/camera-service.env by deploy/install.sh, which detects
+    them. The defaults below are this deployment's hardware, so the service
+    still runs unconfigured, but nothing here needs editing to move machines.
+    """
+    value = os.environ.get(name, "").strip()
+    return value or default
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(_env(name, str(default)))
+    except ValueError:
+        return default
+
+
 # Addressed by the stable by-id link, not by index. /dev/videoN numbering is
 # assigned in probe order, so a kernel upgrade or an extra capture device can
 # move it - and the bcm2835 codec nodes already occupy video10-video23.
-VIDEO_DEVICE = "/dev/v4l/by-id/usb-MACROSILICON_usb_video-video-index0"
+VIDEO_DEVICE = _env(
+    "VIDEO_DEVICE", "/dev/v4l/by-id/usb-MACROSILICON_usb_video-video-index0"
+)
 VIDEO_DEVICE_FALLBACK = "/dev/video0"
-CAPTURE_SIZE = "1280x720"
+CAPTURE_SIZE = _env("CAPTURE_SIZE", "1280x720")
 # The capture dongle only offers discrete rates (5/10/20/25/30). Asking for an
 # unsupported rate silently gets you the next one up - 15 yields 20.
-CAPTURE_FPS = 20
+CAPTURE_FPS = _env_int("CAPTURE_FPS", 20)
 # Recording is decimated below the capture rate on purpose: the live preview
 # benefits from 20 Hz, stored footage does not, and H.264 encoding is the
 # single most expensive thing on this box. Set equal to CAPTURE_FPS for
 # smoother recordings at roughly double the encoder cost.
-RECORD_FPS = 10
-RECORD_BITRATE = "2500k"
+RECORD_FPS = _env_int("RECORD_FPS", 10)
+RECORD_BITRATE = _env("RECORD_BITRATE", "2500k")
 GOP_FRAMES = RECORD_FPS * 2  # keyframe every 2s: seeking, clean segment cuts
 
 # libx264 rather than the Pi's h264_v4l2m2m hardware encoder. v4l2m2m is
@@ -81,16 +102,19 @@ PREVIEW_QUALITY = 7          # mjpeg -q:v, 2 (best) .. 31 (worst)
 
 VIDEO_DIR = BASE_DIR / "videos"
 LOG_DIR = BASE_DIR / "logs"
-RETENTION_DAYS = 14
-MIN_FREE_GB = 50             # hard floor; oldest whole days go first
+RETENTION_DAYS = _env_int("RETENTION_DAYS", 14)
+MIN_FREE_GB = _env_int("MIN_FREE_GB", 50)   # floor; oldest whole days go first
 
 # Addressed by the adapter's own serial number, not by enumeration order.
 # /dev/ttyUSB0 is first-come-first-served: plug in any other USB serial device
 # (most Z-Wave sticks use CP210x chips and claim ttyUSB too) and a reboot can
 # hand that name to the wrong device, silently sending Pelco-D into the radio.
-SERIAL_PORT = "/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_AM00KHR1-if00-port0"
+SERIAL_PORT = _env(
+    "SERIAL_PORT",
+    "/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_AM00KHR1-if00-port0",
+)
 SERIAL_PORT_FALLBACK = "/dev/ttyUSB0"
-SERIAL_BAUD = 9600
+SERIAL_BAUD = _env_int("SERIAL_BAUD", 9600)
 PTZ_SPEED = 25               # Pelco-D pan/tilt speed, 0-63
 
 LISTEN_HOST = "0.0.0.0"

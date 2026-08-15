@@ -15,8 +15,14 @@ set -euo pipefail
 NAME="$1"
 WG_DIR=/etc/wireguard
 CONF="$WG_DIR/wg0.conf"
-LAN_SUBNET="192.168.1.0/24"
 VPN_SUBNET="10.8.0.0/24"
+
+# Derived from this machine's own address rather than assumed. A hardcoded
+# 192.168.1.0/24 produces clients that connect happily and then route nothing,
+# which is a confusing failure to diagnose.
+LAN_IF="$(ip route show default | awk '/default/{print $5; exit}')"
+LAN_CIDR="$(ip -o -f inet addr show "$LAN_IF" | awk '{print $4; exit}')"
+LAN_SUBNET="$(python3 -c 'import ipaddress,sys; print(ipaddress.ip_network(sys.argv[1], strict=False))' "$LAN_CIDR")"
 
 [ -f "$CONF" ] || { echo "Run setup-wireguard.sh first."; exit 1; }
 ENDPOINT="$(cat "$WG_DIR/endpoint")"
