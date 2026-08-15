@@ -13,19 +13,11 @@
 :root {
   /* LCARS color palette - authentic TNG colors */
   --lcars-orange: #ff9c00;
-  --lcars-orange-brown: #ff8a00;
-  --lcars-pink: #ff94c5;
   --lcars-blue: #99b8ff;
-  --lcars-purple: #cc99ff;
-  --lcars-brown: #cc9966;
   --lcars-red: #ff5555;
-  --lcars-yellow: #ffdd22;
-  --lcars-tan: #eeca99;
-  --lcars-peach: #ffddbb;
 
   /* Neutral control surfaces - same tones as the login panel */
   --lcars-panel: #1a1a1a;
-  --lcars-panel-hover: #262626;
   
   /* Background colors */
   --lcars-black: #000000;
@@ -158,7 +150,7 @@ body {
   letter-spacing: 2px;
 }
 
-#stardate {
+#clock {
   color: var(--lcars-black);
   font-size: 1rem;
   font-weight: bold;
@@ -281,14 +273,6 @@ body {
 }
 
 /* Color variations */
-.lcars-bg-orange { background-color: var(--lcars-orange); }
-.lcars-bg-blue { background-color: var(--lcars-blue); }
-.lcars-bg-pink { background-color: var(--lcars-pink); }
-.lcars-bg-purple { background-color: var(--lcars-purple); }
-.lcars-bg-yellow { background-color: var(--lcars-yellow); }
-.lcars-bg-tan { background-color: var(--lcars-tan); }
-.lcars-bg-red { background-color: var(--lcars-red); }
-.lcars-bg-peach { background-color: var(--lcars-peach); }
 
 /* Button shapes */
 .lcars-pill {
@@ -694,7 +678,7 @@ body {
     font-size: 1.2rem;
   }
   
-  #stardate {
+  #clock {
     font-size: 0.9rem;
   }
   
@@ -747,7 +731,7 @@ body {
     font-size: 1rem;
   }
   
-  #stardate {
+  #clock {
     font-size: 0.8rem;
   }
   

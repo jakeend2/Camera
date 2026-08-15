@@ -49,9 +49,14 @@ VIDEO_DEVICE = "/dev/video0"
 CAPTURE_SIZE = "1280x720"
 # The capture dongle only offers discrete rates (5/10/20/25/30). Asking for an
 # unsupported rate silently gets you the next one up - 15 yields 20.
-CAPTURE_FPS = 10
+CAPTURE_FPS = 20
+# Recording is decimated below the capture rate on purpose: the live preview
+# benefits from 20 Hz, stored footage does not, and H.264 encoding is the
+# single most expensive thing on this box. Set equal to CAPTURE_FPS for
+# smoother recordings at roughly double the encoder cost.
+RECORD_FPS = 10
 RECORD_BITRATE = "2500k"
-GOP_FRAMES = 20              # keyframe every 2s: seeking, and clean segment cuts
+GOP_FRAMES = RECORD_FPS * 2  # keyframe every 2s: seeking, clean segment cuts
 
 # libx264 rather than the Pi's h264_v4l2m2m hardware encoder. v4l2m2m is
 # roughly 3x cheaper, but when the filter graph feeds a second output (our
@@ -67,7 +72,7 @@ RECORD_EXT = "ts"
 RECORD_FORMAT = "mpegts"
 
 PREVIEW_WIDTH = 640
-PREVIEW_FPS = 5
+PREVIEW_FPS = 20             # matches CAPTURE_FPS; higher would only duplicate
 PREVIEW_QUALITY = 7          # mjpeg -q:v, 2 (best) .. 31 (worst)
 
 VIDEO_DIR = BASE_DIR / "videos"
@@ -250,7 +255,7 @@ class Recorder:
             stamp = ""
         return (
             f"[0:v]{stamp}split=2[rec][prv];"
-            f"[rec]format=yuv420p[recout];"
+            f"[rec]fps={RECORD_FPS},format=yuv420p[recout];"
             f"[prv]fps={PREVIEW_FPS},scale={PREVIEW_WIDTH}:-2[prvout]"
         )
 

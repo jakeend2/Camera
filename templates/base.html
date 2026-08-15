@@ -63,7 +63,7 @@
           <div class="lcars-header-separator"></div>
           <div class="lcars-header-secondary">
             <div class="lcars-title">CAMERA CONTROL</div>
-            <div id="stardate"></div>
+            <div id="clock"></div>
           </div>
           <div class="lcars-header-elbow"></div>
         </div>
@@ -76,19 +76,20 @@
     <script src="{{ url_for('static', filename='vendor/jquery.slim.min.js') }}"></script>
     <script src="{{ url_for('static', filename='vendor/bootstrap.bundle.min.js') }}"></script>
     
-    <!-- LCARS Stardate Script -->
+    <!-- Header clock -->
     <script>
-      function updateStardate() {
+      // Local wall-clock time, formatted to match the timestamp burned into
+      // the recordings so the two can be read against each other.
+      function updateClock() {
         const now = new Date();
-        const year = now.getFullYear();
-        const dayOfYear = Math.floor((now - new Date(year, 0, 0)) / 86400000);
-        const stardate = Math.floor((year - 2000) * 1000 + dayOfYear);
-        document.getElementById('stardate').textContent = `STARDATE ${stardate}`;
+        const pad = n => String(n).padStart(2, '0');
+        document.getElementById('clock').textContent =
+          `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ` +
+          `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
       }
-      
-      // Update stardate immediately and then every minute
-      updateStardate();
-      setInterval(updateStardate, 60000);
+
+      updateClock();
+      setInterval(updateClock, 1000);
     </script>
     
     {% block script %} {% endblock %}
