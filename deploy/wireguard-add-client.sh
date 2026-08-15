@@ -69,6 +69,10 @@ CLIENT_CONF=$(cat <<EOF
 [Interface]
 PrivateKey = ${CLIENT_KEY}
 Address = ${CLIENT_IP}/32
+# Resolve through the Pi. The router drops public DNS answers pointing at
+# private addresses, so the name on the TLS certificate will not resolve
+# through it.
+DNS = 10.8.0.1
 
 [Peer]
 PublicKey = $(cat "$WG_DIR/server.pub")

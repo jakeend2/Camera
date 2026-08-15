@@ -94,8 +94,22 @@ no-dhcp-interface=wg0
 EOF
 echo "   /etc/dnsmasq.d/camera.conf written"
 
-echo "== syntax check before starting =="
-dnsmasq --test --conf-file=/etc/dnsmasq.conf 2>&1 | sed 's/^/   /'
+echo "== enabling the drop-in directory =="
+# Debian ships /etc/dnsmasq.conf with every conf-dir line commented out, so a
+# drop-in in /etc/dnsmasq.d is never read - and "dnsmasq --test" passes anyway,
+# because it does not read the drop-in either. Silent, and easy to miss.
+if grep -qE "^conf-dir=" /etc/dnsmasq.conf; then
+    echo "   already enabled"
+else
+    printf '
+# Load drop-ins.
+conf-dir=/etc/dnsmasq.d/,*.dpkg-dist,*.dpkg-old,*.dpkg-new
+' >> /etc/dnsmasq.conf
+    echo "   conf-dir appended to /etc/dnsmasq.conf"
+fi
+
+echo "== syntax check =="
+dnsmasq --test 2>&1 | sed 's/^/   /'
 
 echo "== firewall =="
 ufw allow from "$LAN_SUBNET" to any port 53 proto udp comment 'DNS from LAN' >/dev/null
@@ -111,14 +125,17 @@ systemctl is-active dnsmasq | sed 's/^/   dnsmasq: /'
 
 echo
 echo "== verifying =="
-echo -n "   the local name          : "
-dig +short "@127.0.0.1" A "$FQDN" | head -1
-echo -n "   a public name forwards  : "
-dig +short "@127.0.0.1" A deb.debian.org | head -1
-echo -n "   a LAN name via gateway  : "
-dig +short "@127.0.0.1" A "$(hostname).attlocal.net" | head -1 || echo "(none, fine)"
-echo
-ss -tulnp 2>/dev/null | grep -E ':53\b' | sed 's/^/   /'
+ANS="$(dig +short "@127.0.0.1" A "$FQDN" | head -1)"
+if [ "$ANS" = "$LAN_IP" ]; then
+    echo "   $FQDN -> $ANS   correct"
+else
+    echo "   $FQDN -> ${ANS:-NO ANSWER}   expected $LAN_IP"
+    echo "   The drop-in is not being read. Check for an uncommented conf-dir"
+    echo "   line in /etc/dnsmasq.conf, then restart dnsmasq."
+    exit 1
+fi
+echo "   public forwarding       : $(dig +short "@127.0.0.1" A one.one.one.one | head -1)"
+echo "   attlocal.net -> gateway : $(dig +short "@127.0.0.1" A dsldevice.attlocal.net | head -1)"
 
 cat <<EOF
 
