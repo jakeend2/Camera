@@ -1,16 +1,12 @@
 /* LCARS interface for Camera Control Hub - Authentic Star Trek TNG Edition */
 
+/* Antonio, SIL Open Font License - see ../fonts/Antonio-OFL.txt.
+   One variable font covers every weight, served locally: the previous
+   jsdelivr URLs now 404, so the interface had silently lost its font. */
 @font-face {
   font-family: 'LCARS';
-  src: url('https://cdn.jsdelivr.net/gh/Garrett-/lcars-css@master/fonts/Antonio-Bold.ttf') format('truetype');
-  font-weight: bold;
-  font-style: normal;
-}
-
-@font-face {
-  font-family: 'LCARS';
-  src: url('https://cdn.jsdelivr.net/gh/Garrett-/lcars-css@master/fonts/Antonio-Light.ttf') format('truetype');
-  font-weight: normal;
+  src: url('../fonts/Antonio-Variable.ttf') format('truetype-variations');
+  font-weight: 100 700;
   font-style: normal;
 }
 

@@ -32,7 +32,11 @@ from pathlib import Path
 
 import paho.mqtt.client as mqtt
 import serial
-from flask import Flask, Response, jsonify, make_response, render_template, request
+from flask import (Flask, Response, jsonify, make_response, redirect,
+                   render_template, request, url_for)
+from flask_login import (LoginManager, UserMixin, current_user, login_required,
+                         login_user, logout_user)
+from werkzeug.security import check_password_hash
 
 from pelcoD import pelcoD
 
@@ -90,6 +94,18 @@ SERVER_THREADS = 16          # concurrent requests; MJPEG viewers hold one each
 # the recording.
 TLS_CERT = os.environ.get("TLS_CERT", "/etc/camera-tls/server.crt")
 TLS_KEY = os.environ.get("TLS_KEY", "/etc/camera-tls/server.key")
+TLS_AVAILABLE = Path(TLS_CERT).exists() and Path(TLS_KEY).exists()
+
+# Web login. Credentials arrive from /etc/camera-service.env, never the repo.
+# Without them the service still runs but logs a loud warning - losing the
+# recording because a password file went missing would be a worse failure.
+WEB_USERNAME = os.environ.get("WEB_USERNAME", "admin")
+WEB_PASSWORD_HASH = os.environ.get("WEB_PASSWORD_HASH") or None
+SECRET_KEY = os.environ.get("FLASK_SECRET_KEY") or None
+AUTH_ENABLED = bool(WEB_PASSWORD_HASH and SECRET_KEY)
+SESSION_HOURS = 12
+LOGIN_MAX_ATTEMPTS = 5
+LOGIN_LOCKOUT_SECONDS = 300
 
 # MQTT. Credentials arrive from /etc/camera-service.env through systemd's
 # EnvironmentFile, deliberately outside the repo so they are never committed.
@@ -580,6 +596,140 @@ ptz: PTZ | None = None
 shutdown = threading.Event()
 http_server = None
 
+app.secret_key = SECRET_KEY or os.urandom(32)
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    # Only mark the cookie HTTPS-only when we can actually serve HTTPS,
+    # otherwise a cert problem would silently break login entirely.
+    SESSION_COOKIE_SECURE=TLS_AVAILABLE,
+    PERMANENT_SESSION_LIFETIME=timedelta(hours=SESSION_HOURS),
+)
+
+login_manager = LoginManager(app)
+login_manager.login_view = "login"
+login_manager.session_protection = "strong"
+
+# Endpoints reachable without a session: the login form and static assets.
+PUBLIC_ENDPOINTS = {"login", "static"}
+
+
+class User(UserMixin):
+    """The single operator account. There is no user database by design."""
+
+    def get_id(self) -> str:
+        return WEB_USERNAME
+
+
+@login_manager.user_loader
+def load_user(user_id: str):
+    return User() if user_id == WEB_USERNAME else None
+
+
+# Failed-login throttling, keyed by client address. In-memory on purpose:
+# one process, one operator, and a restart clearing it is acceptable.
+_login_failures: dict[str, tuple[int, float]] = {}
+_login_lock = threading.Lock()
+
+
+def _lockout_remaining(addr: str) -> int:
+    with _login_lock:
+        _, until = _login_failures.get(addr, (0, 0.0))
+    return max(0, int(until - time.time()))
+
+
+def _note_failure(addr: str) -> None:
+    with _login_lock:
+        count, _ = _login_failures.get(addr, (0, 0.0))
+        count += 1
+        until = time.time() + LOGIN_LOCKOUT_SECONDS if count >= LOGIN_MAX_ATTEMPTS else 0.0
+        _login_failures[addr] = (count, until)
+    if until:
+        log.warning("Locking out %s for %ds after %d failed logins",
+                    addr, LOGIN_LOCKOUT_SECONDS, count)
+
+
+def _clear_failures(addr: str) -> None:
+    with _login_lock:
+        _login_failures.pop(addr, None)
+
+
+@app.after_request
+def security_headers(response):
+    """Baseline hardening.
+
+    Deliberately no HSTS: the certificate is self-signed, and once a browser
+    pins HSTS it refuses to let you click through the trust warning - that
+    would lock you out of your own camera.
+
+    'unsafe-inline' is needed because base.html and index.html carry inline
+    <style> and <script> blocks. Everything else is 'self' now that Bootstrap,
+    jQuery and the font are served locally.
+    """
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; img-src 'self' data:; "
+        "style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; "
+        "font-src 'self'; connect-src 'self'; frame-ancestors 'none'; "
+        "base-uri 'none'; form-action 'self'",
+    )
+    return response
+
+
+@app.before_request
+def require_login():
+    if not AUTH_ENABLED or request.endpoint in PUBLIC_ENDPOINTS:
+        return None
+    if current_user.is_authenticated:
+        return None
+    # Anything scripted gets a clean 401; a browser navigation gets the form.
+    if request.method == "POST" or request.path in ("/camera", "/health"):
+        return make_response(
+            jsonify({"ok": False, "error": "authentication required"}), 401
+        )
+    return redirect(url_for("login", next=request.path))
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if not AUTH_ENABLED:
+        return redirect(url_for("index"))
+    addr = request.remote_addr or "unknown"
+    error = ""
+
+    if request.method == "POST":
+        wait = _lockout_remaining(addr)
+        if wait:
+            error = f"Too many attempts. Try again in {wait} seconds."
+        else:
+            username = request.form.get("username", "")
+            password = request.form.get("password", "")
+            if (username == WEB_USERNAME
+                    and check_password_hash(WEB_PASSWORD_HASH, password)):
+                _clear_failures(addr)
+                login_user(User(), remember=False)
+                log.info("Login succeeded for '%s' from %s", username, addr)
+                nxt = request.args.get("next", "")
+                # Only ever redirect within this site.
+                if not nxt.startswith("/") or nxt.startswith("//"):
+                    nxt = url_for("index")
+                return redirect(nxt)
+            _note_failure(addr)
+            log.warning("Failed login for '%s' from %s", username, addr)
+            error = "Incorrect username or password."
+
+    return make_response(render_template("login.html", error=error), 401 if error else 200)
+
+
+@app.route("/logout")
+@login_required
+def logout():
+    logout_user()
+    return redirect(url_for("login"))
+
 
 @app.route("/")
 def index():
@@ -864,6 +1014,11 @@ def main() -> None:
              now.isoformat(timespec="seconds"), now.tzname())
     if FONT is None:
         log.warning("No DejaVu font found - recording without a timestamp overlay")
+    if AUTH_ENABLED:
+        log.info("Web login required for user '%s'", WEB_USERNAME)
+    else:
+        log.warning("NO WEB AUTHENTICATION - set WEB_PASSWORD_HASH and "
+                    "FLASK_SECRET_KEY in /etc/camera-service.env")
 
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)

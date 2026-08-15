@@ -6,6 +6,7 @@
 # System packages also required:
 #   ffmpeg, fonts-dejavu-core, mosquitto
 flask>=3.0
+flask-login>=0.6
 pyserial>=3.5
 paho-mqtt>=2.0
 cheroot>=10.0
