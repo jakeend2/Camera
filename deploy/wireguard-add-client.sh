@@ -21,11 +21,23 @@ VPN_SUBNET="10.8.0.0/24"
 [ -f "$CONF" ] || { echo "Run setup-wireguard.sh first."; exit 1; }
 ENDPOINT="$(cat "$WG_DIR/endpoint")"
 
-grep -q "^# client: ${NAME}\$" "$CONF" && { echo "Client '${NAME}' already exists."; exit 1; }
+if grep -q "^# client: ${NAME}\$" "$CONF"; then
+    echo "Client '${NAME}' already exists. Use a different name, or remove"
+    echo "its block from ${CONF} first."
+    exit 1
+fi
 
 # Next free address in the VPN subnet: .1 is the server, clients start at .2.
-LAST=$(grep -oE 'AllowedIPs = 10\.8\.0\.([0-9]+)/32' "$CONF" | grep -oE '[0-9]+/32' | cut -d/ -f1 | sort -n | tail -1)
-NEXT=$(( ${LAST:-1} + 1 ))
+#
+# Guarded by an explicit test rather than letting the pipeline run dry: with
+# no peers yet, grep exits non-zero, and under 'set -eo pipefail' that aborts
+# the script before it writes anything - which broke the very first client.
+LAST=1
+if grep -q 'AllowedIPs = 10\.8\.0\.' "$CONF"; then
+    LAST=$(grep -oE 'AllowedIPs = 10\.8\.0\.[0-9]+/32' "$CONF" \
+           | sed -E 's|.*10\.8\.0\.([0-9]+)/32|\1|' | sort -n | tail -1)
+fi
+NEXT=$(( LAST + 1 ))
 [ "$NEXT" -le 254 ] || { echo "VPN subnet full."; exit 1; }
 CLIENT_IP="10.8.0.${NEXT}"
 
