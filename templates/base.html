@@ -7,25 +7,14 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='vendor/bootstrap.min.css') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/lcars.css') }}">
     <style>
-      /* Additional LCARS styling for base template */
-      .lcars-header-primary {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        color: var(--lcars-black);
-        font-weight: bold;
-        font-size: 1rem;
-      }
+      /* .lcars-header-primary and .lcars-header-elbow used to be repeated here.
+         Both are defined in lcars.css, which also shrinks them at the 768px and
+         480px breakpoints - but this inline block loads after the stylesheet and
+         carried no media queries of its own, so it pinned the elbow at
+         left:120px on every screen size. On a phone its neighbours shrank to
+         80px and 20px while the elbow stayed put, leaving a black tab stranded
+         on top of the orange banner. Header styling lives in lcars.css only. */
       
-      .lcars-header-elbow {
-        position: absolute;
-        width: 30px;
-        height: 15px;
-        background-color: var(--lcars-black);
-        left: 120px;
-        top: 0;
-        border-bottom-right-radius: var(--lcars-border-radius);
-      }
       
       /* Better responsive styles */
       @media (max-width: 768px) {
