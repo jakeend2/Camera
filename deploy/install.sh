@@ -171,6 +171,12 @@ run chown -R "$OWNER:$SERVICE_USER" "$INSTALL_DIR"
 run chmod -R g+rX "$INSTALL_DIR"
 run chmod -R g+w "$INSTALL_DIR/videos" "$INSTALL_DIR/logs"
 info "Owner ${OWNER}, group ${SERVICE_USER}; videos/ and logs/ are setgid."
+# An older layout kept clip scratch inside the install tree, where
+# ProtectSystem=strict makes it read-only. systemd owns that directory now.
+if [ -d "$INSTALL_DIR/clips" ]; then
+    run rm -rf "$INSTALL_DIR/clips"
+    info "Removed the old in-tree clips cache; systemd now provides /var/cache/camera."
+fi
 
 # ---------------------------------------------------------------------------
 say "Credentials"

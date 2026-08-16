@@ -41,6 +41,11 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ReadWritePaths=/opt/camera/videos /opt/camera/logs
+# Clip scratch and cached playback windows. systemd creates
+# /var/cache/camera owned by the service user and makes it writable despite
+# ProtectSystem=strict; the service reads $CACHE_DIRECTORY to find it.
+CacheDirectory=camera
+CacheDirectoryMode=0750
 ProtectHome=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes

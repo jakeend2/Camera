@@ -641,11 +641,27 @@
     seekTo(Math.max(0, at + delta), !player.paused);
   }
 
-  // Gaps are handled before asking, from the timeline; this is the backstop
-  // for a window that genuinely failed to cut.
+  /* Gaps are handled before asking, from the timeline, so reaching here means
+   * the window really failed. The <video> element cannot show a JSON body, so
+   * ask the same URL again and report what the server actually said - a
+   * read-only cache directory and a missing file should not look alike. */
   player.addEventListener("error", function () {
     if (windowStart === null) return;
-    flash("could not load that window", true);
+    fetch("/play?day=" + encodeURIComponent(day) + "&t=" + windowStart.toFixed(1),
+          { credentials: "include" })
+      .then(function (r) {
+        if (r.ok) return null;                 // transient: it works now
+        return r.json().catch(function () {
+          return { error: "server said " + r.status };
+        });
+      })
+      .then(function (j) {
+        if (j) {
+          flash(j.error || "could not load that window", true);
+          $("w-seg").textContent = "playback failed";
+        }
+      })
+      .catch(function () { flash("could not load that window", true); });
   });
 
   player.addEventListener("loadedmetadata", function () {

@@ -137,7 +137,43 @@ CLIP_MAX_SECONDS = _env_int("CLIP_MAX_SECONDS", 1800)
 # MEDIA_WAIT seconds is refused rather than queued behind a viewer.
 MEDIA_JOBS = _env_int("MEDIA_JOBS", 3)
 MEDIA_WAIT = 8
-CLIP_DIR = BASE_DIR / "clips"
+def _cache_dir() -> Path:
+    """Somewhere to put clip scratch and cached playback windows.
+
+    The unit runs ProtectSystem=strict, so this cannot simply be a directory
+    inside the install tree: that filesystem is read-only to the service no
+    matter who owns the directory. Candidates are tried in order and the
+    first one that can actually hold a file wins.
+
+    /var/cache/camera, via systemd's CacheDirectory=, is the intended home -
+    outside the app tree, created with the right ownership, and cleaned up by
+    `systemctl clean`. A service whose unit predates this feature has no such
+    directory, so the fallback is beside the logs, which the unit already
+    grants write access to. Nothing here needs privilege, and the moment the
+    unit is reinstalled the cache moves to /var/cache/camera by itself.
+    """
+    candidates = [
+        os.environ.get("CACHE_DIR", "").strip(),
+        os.environ.get("CACHE_DIRECTORY", "").split(":")[0].strip(),
+        str(LOG_DIR / "media-cache"),
+        str(BASE_DIR / "clips"),
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        path = Path(candidate)
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+            probe = path / ".writable"
+            probe.write_bytes(b"")
+            probe.unlink()
+            return path
+        except OSError:
+            continue
+    return BASE_DIR / "clips"       # nothing worked; startup will say so
+
+
+CLIP_DIR = _cache_dir()
 NICE = ["nice", "-n", "10", "ionice", "-c", "3"]
 
 LISTEN_HOST = "0.0.0.0"
@@ -1386,7 +1422,10 @@ def _sweep_windows() -> None:
 
 def _build_window(seg: dict, into: float, length: float, key: str):
     """Cut one playback window, reusing the cached copy when there is one."""
-    WINDOW_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        WINDOW_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return None, f"cache directory {WINDOW_DIR} is not writable: {exc}"
     final = WINDOW_DIR / key
     if final.exists() and final.stat().st_size > 0:
         return final, None
@@ -1457,8 +1496,8 @@ def play():
             _media_slots.release()
         if built is None:
             log.error("Window build failed for %s: %s", key, err)
-            return make_response(jsonify({"ok": False, "error": "cut failed"}),
-                                 500)
+            return make_response(
+                jsonify({"ok": False, "error": err or "cut failed"}), 500)
 
     resp = send_from_directory(WINDOW_DIR, key, mimetype="video/mp4",
                                conditional=True)
@@ -1577,6 +1616,27 @@ def clip():
     resp.headers["X-Covered-Seconds"] = f"{covered:.1f}"
     resp.headers["X-Missing-Seconds"] = f"{max(0.0, span - covered):.1f}"
     return resp
+
+
+def check_cache_writable() -> bool:
+    """Confirm at startup that archive playback will actually be able to run.
+
+    The service is sandboxed with ProtectSystem=strict, so a cache directory
+    that is not in ReadWritePaths reads as a read-only filesystem however the
+    permissions look. Better to say so on boot than on the first click.
+    """
+    try:
+        CLIP_DIR.mkdir(parents=True, exist_ok=True)
+        probe = CLIP_DIR / ".writable"
+        probe.write_bytes(b"")
+        probe.unlink()
+        log.info("Media cache at %s", CLIP_DIR)
+        return True
+    except OSError as exc:
+        log.error("Media cache %s is not writable (%s) - archive playback and "
+                  "clipping will fail. Under systemd, add CacheDirectory= or "
+                  "list the path in ReadWritePaths.", CLIP_DIR, exc)
+        return False
 
 
 def sweep_clips() -> None:
@@ -1824,6 +1884,7 @@ def main() -> None:
 
     setup_logging()
     VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+    check_cache_writable()
     sweep_clips()
 
     log.info("Camera service starting in %s", BASE_DIR)

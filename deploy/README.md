@@ -414,6 +414,30 @@ Archive work runs `nice -n 10 ionice -c 3` and no more than MEDIA_JOBS (3) at
 once, with requests refused rather than queued after MEDIA_WAIT seconds. The
 live recording always wins.
 
+**Where the cache lives, and why it is not in the install tree.** The unit
+runs `ProtectSystem=strict`, which makes everything outside `ReadWritePaths`
+read-only *to the service* no matter who owns it. The first version of this
+feature put its scratch in `/opt/camera/clips`, and every playback request
+died on `Errno 30: Read-only file system` - while every test passed, because
+the tests drove the app in-process as the `pi` user, outside the sandbox
+entirely. A feature that works when you test it as yourself and fails as the
+service is the failure mode this sandbox is built to produce.
+
+So the cache directory is now chosen at startup by trying candidates and
+keeping the first that can hold a file: `$CACHE_DIR`, then systemd's
+`$CACHE_DIRECTORY`, then `logs/media-cache`, which the unit already grants.
+`CacheDirectory=camera` in the unit makes systemd provide `/var/cache/camera`
+- outside the tree, correct ownership, removable with `systemctl clean` - and
+the service moves there by itself once the unit is reinstalled:
+
+    sudo cp /opt/camera/deploy/camera.service /etc/systemd/system/
+    sudo systemctl daemon-reload && sudo systemctl restart camera.service
+
+Startup logs which directory it settled on, and says loudly if none worked.
+Anything touching the sandbox should be checked against the running service
+over HTTPS, not through the test client - `deploy/verify-live.sh` does that,
+minting a session from the same `EnvironmentFile` the service reads.
+
 ---
 
 ## The camera itself: verified, confirmed, gated
