@@ -161,6 +161,16 @@ a { color: var(--blue); }
   gap: var(--pad);
 }
 
+/* The rail scrolls, so nothing in it may be squeezed to make room - that is
+   what the scrollbar is for. This is not belt and braces: a flex item whose
+   own overflow is hidden loses the automatic minimum size that would
+   otherwise stop it collapsing, and the camera switcher (.seg sets
+   overflow: hidden for its rounded corners) was crushed from 48px to its
+   4px of border whenever the PTZ sections made the rail overflow. Its
+   buttons stayed 44px and were simply clipped, so it stayed clickable on a
+   desktop and became impossible to tap on a phone. */
+.rail > * { flex-shrink: 0; }
+
 @media (min-width: 1024px) {
   .app { flex-direction: row; }
   .video-pane { flex: 1; min-height: 0; }
