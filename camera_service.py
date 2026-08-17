@@ -1177,6 +1177,19 @@ HTTP_PTZ_ROUTES = {
 imager_state = "unknown"
 
 
+def ptz_camera_or_error(cam) -> str:
+    """Empty string if this camera can be driven, else why it cannot.
+
+    A fixed camera has no motors, so a PTZ request against it is a mistake
+    worth naming rather than a silent no-op that looks like a broken camera.
+    """
+    if cam is None:
+        return "no such camera"
+    if not cam.cfg.has_ptz:
+        return f"{cam.cfg.name} has no pan/tilt/zoom"
+    return ""
+
+
 def execute_ptz(action: str, preset: int | None = None,
                 speed: int | None = None) -> tuple[bool, str]:
     """Run one PTZ action. Returns (ok, error message)."""
@@ -1401,6 +1414,9 @@ def logout():
 def index():
     return render_template(
         "index.html",
+        cameras=[{"cid": c.cid, "name": c.cfg.name, "aspect": c.cfg.aspect,
+                  "ptz": c.cfg.has_ptz} for c in CAMERAS.values()],
+        cam=primary().cid,
         diagonals=DIAGONALS_ENABLED,
         default_speed=PTZ_SPEED,
         auth_enabled=AUTH_ENABLED,
@@ -1409,11 +1425,16 @@ def index():
 
 @app.route("/camera")
 def camera():
+    cam = _camera_arg()
+    if cam is None:
+        return _no_such_camera(request.args.get("cam", ""))
+    buf = cam.frames
+
     def stream():
-        last = frames.seq - 1
+        last = buf.seq - 1
         idle = 0
         while not shutdown.is_set():
-            got = frames.wait_for(last, timeout=2.0)
+            got = buf.wait_for(last, timeout=2.0)
             if got is None:
                 idle += 1
                 # A generator that never yields can never notice the client has
@@ -1439,6 +1460,11 @@ def _register_ptz_routes() -> None:
     """Expose every PTZ action at the URL the existing web UI already uses."""
     for rule, action in HTTP_PTZ_ROUTES.items():
         def view(action=action):
+            cam = _camera_arg()
+            why = ptz_camera_or_error(cam)
+            if why:
+                return make_response(
+                    jsonify({"ok": False, "action": action, "error": why}), 400)
             payload = request.get_json(silent=True) or {}
             speed = payload.get("speed") if isinstance(payload, dict) else None
             try:
@@ -1512,19 +1538,23 @@ def snapshot():
     Preview resolution (640 wide) with the timestamp already burned in -
     drawtext runs before ffmpeg's split, so every path carries it.
     """
-    jpeg = frames.latest()
+    cam = _camera_arg()
+    if cam is None:
+        return _no_such_camera(request.args.get("cam", ""))
+    jpeg = cam.frames.latest()
     if jpeg is None:
         return make_response(jsonify({"ok": False, "error": "no frame yet"}), 503)
     resp = make_response(jpeg)
     resp.headers["Content-Type"] = "image/jpeg"
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    resp.headers["Content-Disposition"] = f'attachment; filename="cam-{stamp}.jpg"'
+    resp.headers["Content-Disposition"] = (
+        f'attachment; filename="{cam.cid}-{stamp}.jpg"')
     return resp
 
 
-def _recording_entries() -> list[dict]:
+def _recording_entries(cam) -> list[dict]:
     entries = []
-    for path in sorted(VIDEO_DIR.glob(f"*.{RECORD_EXT}"), reverse=True):
+    for path in sorted(cam.video_dir.glob(f"*.{RECORD_EXT}"), reverse=True):
         day = day_of(path)
         if day is None:
             continue
@@ -1540,22 +1570,32 @@ def _recording_entries() -> list[dict]:
 
 @app.route("/recordings")
 def recordings():
-    entries = _recording_entries()
+    cam = _camera_arg()
+    if cam is None:
+        return _no_such_camera(request.args.get("cam", ""))
+    entries = _recording_entries(cam)
     return render_template(
         "recordings.html",
         entries=entries,
+        cam=cam.cid,
+        cameras=[{"cid": c.cid, "name": c.cfg.name} for c in CAMERAS.values()],
         total_gb=round(sum(e["size_gb"] for e in entries), 1),
-        free_gb=round(shutil.disk_usage(VIDEO_DIR).free / 2**30, 1),
-        retention_days=primary().cfg.retention_days,
+        free_gb=round(shutil.disk_usage(VIDEO_ROOT).free / 2**30, 1),
+        retention_days=cam.cfg.retention_days,
     )
 
 
 @app.route("/recordings/<name>")
 def recording_file(name: str):
+    cam = _camera_arg()
+    if cam is None:
+        return _no_such_camera(request.args.get("cam", ""))
     # Only names the glob actually produced - user input never touches a path.
-    if not any(e["name"] == name for e in _recording_entries()):
+    # Scoped to one camera, so a name that exists under a different camera is
+    # not silently served from the wrong archive.
+    if not any(e["name"] == name for e in _recording_entries(cam)):
         return make_response(jsonify({"ok": False, "error": "no such recording"}), 404)
-    return send_from_directory(VIDEO_DIR, name, as_attachment=True,
+    return send_from_directory(cam.video_dir, name, as_attachment=True,
                                conditional=True)
 
 
@@ -1579,6 +1619,24 @@ class MediaBusy(Exception):
 def _take_slot():
     if not _media_slots.acquire(timeout=MEDIA_WAIT):
         raise MediaBusy()
+
+
+def _camera_arg(param: str = "cam"):
+    """The camera a request is about, or None if it named one that is unknown.
+
+    Absent means the primary camera, so every URL that predates multi-camera
+    support keeps working exactly as it did.
+    """
+    cid = (request.args.get(param) or "").strip()
+    if not cid:
+        return primary()
+    return CAMERAS.get(cid)
+
+
+def _no_such_camera(cid: str):
+    return make_response(jsonify({
+        "ok": False, "error": f"no camera '{cid}'",
+        "cameras": list(CAMERAS)}), 404)
 
 
 def _parse_day(raw: str):
@@ -1617,12 +1675,15 @@ def timeline():
     and whatever happened in between was not recorded. The UI draws them
     rather than papering over them.
     """
+    cam = _camera_arg()
+    if cam is None:
+        return _no_such_camera(request.args.get("cam", ""))
     day = _parse_day(request.args.get("day", ""))
     if day is None:
         return make_response(jsonify({"ok": False, "error": "bad day"}), 400)
 
     midnight = ArchiveIndex.midnight(day)
-    segs = archive.segments(day)
+    segs = cam.index.segments(day)
     out, gaps, previous = [], [], None
     for seg in segs:
         begin = seg["start"] - midnight
@@ -1638,30 +1699,50 @@ def timeline():
         })
     return jsonify({
         "ok": True,
+        "cam": cam.cid,
+        "cameras": [{"cid": c.cid, "name": c.cfg.name,
+                     "aspect": c.cfg.aspect, "ptz": c.cfg.has_ptz}
+                    for c in CAMERAS.values()],
         "day": day.isoformat(),
-        "days": archive.days(),
+        "days": cam.index.days(),
         "segments": out,
         "gaps": gaps,
         "covered_seconds": round(sum(s["duration"] for s in segs)),
         "clip_max": CLIP_MAX_SECONDS,
-        "window": PLAY_WINDOW_SECONDS,
+        "window": cam.cfg.play_window_seconds,
     })
 
 
 @app.route("/watch")
 @app.route("/watch/<day>")
 def watch(day: str = ""):
+    cam = _camera_arg()
+    if cam is None:
+        return _no_such_camera(request.args.get("cam", ""))
     parsed = _parse_day(day) if day else None
     if parsed is None:
-        days = archive.days()
+        days = cam.index.days()
         parsed = _parse_day(days[0]) if days else date.today()
-    return render_template("watch.html", day=parsed.isoformat())
+    return render_template(
+        "watch.html", day=parsed.isoformat(), cam=cam.cid,
+        cameras=[{"cid": c.cid, "name": c.cfg.name} for c in CAMERAS.values()])
 
 
 WINDOW_DIR = CLIP_DIR / "windows"
 
 
-# Last time each cached window was actually served, by filename. The
+def cam_window_dir(cam) -> Path:
+    """Where one camera's cached playback windows live.
+
+    A subdirectory per camera, because the key is built from the segment
+    filename and two cameras both produce "2026-08-16.ts" - a shared
+    directory would serve one camera's video for the other's request, with a
+    200 and an X-Segment header that agreed with itself.
+    """
+    return WINDOW_DIR / cam.cid
+
+
+# Last time each cached window was actually served, by path. The
 # filesystem cannot answer this: the root filesystem is mounted noatime, so
 # st_atime is never updated by a read and sorting on it evicts in creation
 # order - FIFO wearing an LRU label. Reads are recorded here instead.
@@ -1674,10 +1755,19 @@ def _note_window_use(key: str) -> None:
         _window_hits[key] = time.time()
 
 
+def _window_key(path: Path) -> str:
+    """Cache identity of a window file: camera directory plus filename."""
+    return f"{path.parent.name}/{path.name}"
+
+
 def _sweep_windows() -> None:
-    """Hold the window cache under budget, dropping least-recently-used."""
+    """Hold the window cache under budget, dropping least-recently-used.
+
+    Recursive, and across every camera: the budget is the disk, which none of
+    them owns individually.
+    """
     try:
-        entries = list(WINDOW_DIR.glob("*.mp4"))
+        entries = list(WINDOW_DIR.glob("**/*.mp4"))
     except OSError:
         return
     files = []
@@ -1689,8 +1779,9 @@ def _sweep_windows() -> None:
                 continue
             # Anything not served since this process started falls back to
             # its build time, which is the best evidence available.
-            files.append((_window_hits.get(f.name, st.st_mtime), st.st_size, f))
-        live = {f.name for f in entries}
+            files.append((_window_hits.get(_window_key(f), st.st_mtime),
+                          st.st_size, f))
+        live = {_window_key(f) for f in entries}
         for gone in [k for k in _window_hits if k not in live]:
             del _window_hits[gone]
     total = sum(size for _, size, _ in files)
@@ -1705,23 +1796,24 @@ def _sweep_windows() -> None:
             pass
 
 
-def _build_window(seg: dict, into: float, length: float, key: str):
+def _build_window(cam, seg: dict, into: float, length: float, key: str):
     """Cut one playback window, reusing the cached copy when there is one."""
+    window_dir = cam_window_dir(cam)
     try:
-        WINDOW_DIR.mkdir(parents=True, exist_ok=True)
+        window_dir.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
-        return None, f"cache directory {WINDOW_DIR} is not writable: {exc}"
-    final = WINDOW_DIR / key
+        return None, f"cache directory {window_dir} is not writable: {exc}"
+    final = window_dir / key
     if final.exists() and final.stat().st_size > 0:
         return final, None
 
     # Built under a unique name and renamed into place, so two viewers asking
     # for the same window cannot serve each other a half-written file.
-    scratch = WINDOW_DIR / f".{key}.{os.getpid()}.{threading.get_ident()}.part"
+    scratch = window_dir / f".{key}.{os.getpid()}.{threading.get_ident()}.part"
     ok, err = _run_media([
         "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
         "-ss", f"{into:.3f}", "-t", f"{length:.3f}",
-        "-i", str(VIDEO_DIR / seg["name"]),
+        "-i", str(cam.video_dir / seg["name"]),
         "-c", "copy", "-an", "-movflags", "+faststart",
         "-f", "mp4", "-y", str(scratch),
     ], timeout=180)
@@ -1745,21 +1837,25 @@ def play():
     Playback that runs past the end of a segment stops there; the page picks
     up the next one.
     """
+    cam = _camera_arg()
+    if cam is None:
+        return _no_such_camera(request.args.get("cam", ""))
     day = _parse_day(request.args.get("day", ""))
     if day is None:
         return make_response(jsonify({"ok": False, "error": "bad day"}), 400)
 
     offset = max(0.0, _float_arg("t", 0.0))
-    hit = archive.locate(day, offset)
+    hit = cam.index.locate(day, offset)
     if hit is None:
-        nxt = archive.next_after(day, offset)
+        nxt = cam.index.next_after(day, offset)
         return make_response(jsonify({
             "ok": False, "error": "no recording at that time",
             "next": round(nxt, 1) if nxt is not None else None,
         }), 404)
 
     seg, into = hit
-    window = min(_float_arg("d", PLAY_WINDOW_SECONDS), PLAY_WINDOW_SECONDS)
+    cam_window = cam.cfg.play_window_seconds
+    window = min(_float_arg("d", cam_window), cam_window)
     window = min(window, max(1.0, seg["duration"] - into))
 
     # Windows are quantised so that scrubbing around one moment keeps asking
@@ -1769,24 +1865,26 @@ def play():
     length = min(grid, max(1.0, seg["duration"] - aligned))
     key = f"{seg['name']}.{int(aligned)}.{int(length)}.mp4"
 
-    cached = WINDOW_DIR / key
+    window_dir = cam_window_dir(cam)
+    cached = window_dir / key
     if not (cached.exists() and cached.stat().st_size > 0):
         try:
             _take_slot()
         except MediaBusy:
             return make_response(jsonify({"ok": False, "error": "busy"}), 503)
         try:
-            built, err = _build_window(seg, aligned, length, key)
+            built, err = _build_window(cam, seg, aligned, length, key)
         finally:
             _media_slots.release()
         if built is None:
-            log.error("Window build failed for %s: %s", key, err)
+            log.error("Window build failed for %s/%s: %s", cam.cid, key, err)
             return make_response(
                 jsonify({"ok": False, "error": err or "cut failed"}), 500)
 
-    _note_window_use(key)
-    resp = send_from_directory(WINDOW_DIR, key, mimetype="video/mp4",
+    _note_window_use(f"{cam.cid}/{key}")
+    resp = send_from_directory(window_dir, key, mimetype="video/mp4",
                                conditional=True)
+    resp.headers["X-Camera"] = cam.cid
     resp.headers["X-Segment"] = seg["name"]
     resp.headers["X-Window-Start"] = f"{(seg['start'] - ArchiveIndex.midnight(day)) + aligned:.1f}"
     resp.headers["X-Window"] = f"{length:.1f}"
@@ -1804,6 +1902,9 @@ def clip():
     cannot be filled - the burned-in clock in the picture jumps, and the
     header reports how much time is missing.
     """
+    cam = _camera_arg()
+    if cam is None:
+        return _no_such_camera(request.args.get("cam", ""))
     day = _parse_day(request.args.get("day", ""))
     if day is None:
         return make_response(jsonify({"ok": False, "error": "bad day"}), 400)
@@ -1819,7 +1920,7 @@ def clip():
             "error": f"clip longer than {CLIP_MAX_SECONDS // 60} minutes",
         }), 400)
 
-    cuts = archive.overlapping(day, start, end)
+    cuts = cam.index.overlapping(day, start, end)
     if not cuts:
         return make_response(jsonify({
             "ok": False, "error": "no recording in that range"}), 404)
@@ -1840,7 +1941,7 @@ def clip():
             ok, err = _run_media([
                 "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
                 "-ss", f"{cut['seek']:.3f}", "-t", f"{cut['take']:.3f}",
-                "-i", str(VIDEO_DIR / cut["name"]),
+                "-i", str(cam.video_dir / cut["name"]),
                 "-c", "copy", "-f", "mpegts", "-y", str(piece),
             ])
             if not ok or not piece.exists() or piece.stat().st_size == 0:
@@ -1903,7 +2004,8 @@ def clip():
     resp = Response(deliver(), mimetype="video/mp4")
     resp.headers["Content-Length"] = str(size)
     resp.headers["Content-Disposition"] = (
-        f'attachment; filename="cam-{stamp}-{int(span)}s.mp4"')
+        f'attachment; filename="{cam.cid}-{stamp}-{int(span)}s.mp4"')
+    resp.headers["X-Camera"] = cam.cid
     resp.headers["X-Covered-Seconds"] = f"{covered:.1f}"
     resp.headers["X-Missing-Seconds"] = f"{max(0.0, span - covered):.1f}"
     return resp
@@ -1988,31 +2090,61 @@ def _deferred_exit() -> None:
     os._exit(0)
 
 
-def current_state() -> dict:
-    """One snapshot of service health, shared by /health and MQTT."""
-    current = VIDEO_DIR / f"{date.today():%Y-%m-%d}.{RECORD_EXT}"
+def camera_state(cam) -> dict:
+    """Health of one camera."""
+    current = cam.video_dir / f"{date.today():%Y-%m-%d}.{RECORD_EXT}"
     exists = current.exists()
+    rec = cam.recorder
     return {
-        "recording": recorder.alive,
-        "ffmpeg_restarts": recorder.restarts,
-        "ffmpeg_started": recorder.started_at.isoformat() if recorder.started_at else None,
-        "preview_frames": frames.seq,
-        "serial": ptz is not None and ptz.connected,
+        "cam": cam.cid,
+        "name": cam.cfg.name,
+        "kind": cam.cfg.kind,
+        "aspect": cam.cfg.aspect,
+        "ptz": cam.cfg.has_ptz,
+        "recording": rec.alive,
+        "ffmpeg_restarts": rec.restarts,
+        "ffmpeg_started": rec.started_at.isoformat() if rec.started_at else None,
+        "preview_frames": cam.frames.seq,
         "current_file": current.name if exists else None,
         "current_size_gb": round(current.stat().st_size / 2**30, 2) if exists else 0,
-        "free_gb": round(shutil.disk_usage(VIDEO_DIR).free / 2**30, 1),
-        "retention_days": primary().cfg.retention_days,
-        # Last COMMANDED imager - RS-485 has no readback, so this is an
-        # assumption the UI must present as such, never as ground truth.
-        "imager": imager_state,
+        "retention_days": cam.cfg.retention_days,
         "archive_gb": round(sum(
-            f.stat().st_size for f in VIDEO_DIR.glob(f"*.{RECORD_EXT}")
+            f.stat().st_size for f in cam.video_dir.glob(f"*.{RECORD_EXT}")
         ) / 2**30, 1),
     }
 
 
+def current_state() -> dict:
+    """One snapshot of service health, shared by /health and MQTT.
+
+    The top level keeps the single-camera keys the existing page and MQTT
+    bridge already read, reporting the primary camera, and adds a "cameras"
+    map beside them. Renaming them instead would have broken the UI and every
+    MQTT consumer for no gain.
+    """
+    per_cam = {cam.cid: camera_state(cam) for cam in CAMERAS.values()}
+    head = dict(per_cam.get(primary().cid, {}))
+    head.update({
+        "cameras": per_cam,
+        "primary": primary().cid,
+        "serial": ptz is not None and ptz.connected,
+        "free_gb": round(shutil.disk_usage(VIDEO_ROOT).free / 2**30, 1),
+        # Last COMMANDED imager - RS-485 has no readback, so this is an
+        # assumption the UI must present as such, never as ground truth.
+        "imager": imager_state,
+    })
+    return head
+
+
 @app.route("/health")
 def health():
+    """Whole-service health, or one camera's with ?cam=<id>."""
+    cid = (request.args.get("cam") or "").strip()
+    if cid:
+        cam = CAMERAS.get(cid)
+        if cam is None:
+            return _no_such_camera(cid)
+        return jsonify(camera_state(cam))
     return jsonify(current_state())
 
 
