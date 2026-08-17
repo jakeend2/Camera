@@ -170,6 +170,16 @@ run install -d -o "$OWNER" -g "$SERVICE_USER" -m 2775 "$INSTALL_DIR/videos" "$IN
 run chown -R "$OWNER:$SERVICE_USER" "$INSTALL_DIR"
 run chmod -R g+rX "$INSTALL_DIR"
 run chmod -R g+w "$INSTALL_DIR/videos" "$INSTALL_DIR/logs"
+# Each camera records into videos/<cid>/. The service creates its own
+# directory on first start and gets the ownership right by inheriting the
+# setgid parent - but a directory made by hand does not, and the service
+# then cannot write to it. Normalise anything already there so a manual
+# mkdir cannot silently stop a camera recording.
+if [ -d "$INSTALL_DIR/videos" ]; then
+    find "$INSTALL_DIR/videos" -mindepth 1 -type d         -exec chown "$OWNER:$SERVICE_USER" {} +         -exec chmod 2775 {} + 2>/dev/null || true
+    CAMDIRS="$(find "$INSTALL_DIR/videos" -mindepth 1 -maxdepth 1 -type d         -printf '%f ' 2>/dev/null)"
+    [ -n "$CAMDIRS" ] && info "Per-camera directories: ${CAMDIRS}"
+fi
 info "Owner ${OWNER}, group ${SERVICE_USER}; videos/ and logs/ are setgid."
 # An older layout kept clip scratch inside the install tree, where
 # ProtectSystem=strict makes it read-only. systemd owns that directory now.

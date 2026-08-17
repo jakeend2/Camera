@@ -422,6 +422,141 @@ mosquitto_sub -h 127.0.0.1 -u camera -P '<password>' -t 'camera/#' -v
 
 ---
 
+## More than one camera
+
+Each camera is an object that owns its own directory, archive index, probe
+cache, frame buffer, recorder and retention window. Nothing mutable is shared,
+and that is structural rather than tidy: the three ways two cameras could
+corrupt each other are all *silent wrong-data* failures, which for a security
+recorder is the worst class there is.
+
+| If storage were shared | What you would see |
+|---|---|
+| One index over both | the overlap trim clamps camera A's segment to camera B's start; a timeline collapses |
+| One probe cache | both produce `2026-08-16.ts`; birth times and durations cross over |
+| One window cache | `/play` serves the wrong camera's video, with HTTP 200 and a self-consistent `X-Segment` |
+
+None of those throw. Giving each camera its own everything makes them
+impossible to express.
+
+```
+/opt/camera/videos/mic612/2026-08-16.ts
+/opt/camera/videos/backyard/2026-08-16.ts
+/opt/camera/logs/archive-index-mic612.json
+/var/cache/camera/windows/<cid>/...
+```
+
+Subdirectories rather than filename prefixes, so within one camera the day
+genuinely *is* the whole filename and `DAY_FILE_RE`, `day_of()` and the
+`.partNN` convention need no changes at all.
+
+### Selecting a camera
+
+Every route takes `?cam=<id>`, defaulting to the primary. Omitting it means
+what it always meant, so bookmarks and existing MQTT automations keep working.
+Naming a camera that does not exist is refused with 404 and the list of real
+ones - falling back to a different camera is the failure this design exists to
+prevent, so the default applies only when nothing was named.
+
+PTZ is a capability, not an assumption. A camera without motors refuses with
+"<name> has no pan/tilt/zoom" over both HTTP and MQTT, and the web UI hides
+the motion, preset and imager sections entirely rather than showing controls
+that do nothing.
+
+### Adding one
+
+Append a `CameraConfig` to `camera_configs()` in `camera_service.py`. Anything
+host-specific is overridable per camera as `CAM_<ID>_<KEY>`, and the old flat
+keys still work for the original camera so `/etc/camera-service.env` needed no
+edit when this arrived.
+
+```
+CAM_BACKYARD_USER=admin
+CAM_BACKYARD_PASS="((*Why))*452"      # quote anything a shell would parse
+CAM_BACKYARD_RETENTION_DAYS=7
+CAMERAS=mic612,backyard               # optional: narrow what this host runs
+```
+
+**Quote values containing shell metacharacters.** systemd parses this file
+itself and does not care, but every script that `source`s it does - adding an
+unquoted password with parentheses in it broke `verify-live.sh` while the
+service carried on perfectly, which took a while to notice.
+
+A camera whose password is missing is skipped with a reason rather than
+starting a recorder that fails in a loop.
+
+### Recording a network camera
+
+```
+ffmpeg -hide_banner -loglevel warning
+  -rtsp_transport tcp -timeout 5000000
+  -i rtsp://user:pass@host:554/h264Preview_01_main
+  -map 0:v:0 -c:v copy -an
+  -f segment -segment_time 86400 -segment_atclocktime 1
+  -segment_format mpegts -strftime 1 -reset_timestamps 1
+  videos/backyard/%Y-%m-%d.ts
+```
+
+- **`-timeout`, not `-stimeout`** on this ffmpeg (5.1.9). Verify with
+  `ffmpeg -h demuxer=rtsp | grep -i timeout` before assuming: the wrong
+  spelling either refuses to start, or leaves a black-holed socket hanging
+  forever while the supervisor never sees an exit.
+- **TCP.** A dropped UDP packet under `-c copy` is corruption written straight
+  into the archive.
+- **No filter of any kind.** See the note in the root README.
+- Credentials are inserted percent-encoded when the argument list is built,
+  and scrubbed from ffmpeg's stderr before it reaches the journal. They are
+  still visible in `ps`, because ffmpeg accepts RTSP credentials only in the
+  URL. `hidepid` on /proc is the only real mitigation.
+
+### Live preview
+
+The analog camera's preview is nearly free - its ffmpeg already decodes the
+capture, so a second output costs only the MJPEG encode. A network camera has
+no such spare decode, so its preview comes from the camera's own low-res
+substream in a separate process: measured at 20% of a core against 4% for the
+recording it must not disturb.
+
+That process runs only while somebody is watching, plus `PREVIEW_LINGER`
+seconds. The saving matters less for CPU than for the camera: every RTSP
+session is a resource on the device itself. Cold start to first frame is about
+6.5 seconds, which `/health` reports as `preview_running` so the page can say
+so instead of showing a dead frame.
+
+### Retention
+
+Per camera, and deliberately equal here. A day that has one angle but not the
+other is worse than a shorter archive, because you go looking for the second
+view of an incident and it is simply gone.
+
+| | Measured | 7 days |
+|---|---|---|
+| mic612 | 28 GB/day | 198 GB |
+| backyard | 57 GB/day | 396 GB |
+| | | **594 GB** of ~820 GB free |
+
+`enforce_free_space()` picks the oldest day across *all* cameras, so the
+emergency path cannot favour whichever is listed first, and
+`stray_recording_dirs()` warns about directories no camera owns - retention
+cannot delete what it cannot see, but the disk still charges for it.
+
+### MQTT
+
+```
+camera/status              online | offline (retained, LWT)
+camera/state               whole service (retained)
+camera/<cid>/state         one camera (retained)
+camera/<cid>/ptz/set       commands for that camera
+camera/<cid>/ptz/result    outcome
+camera/ptz/set             the primary camera - kept for existing automations
+```
+
+The unqualified topics still address the primary camera. Silently retargeting
+an existing automation at a different device would be the worst possible way
+to introduce a second one.
+
+---
+
 ## Watching and clipping the archive
 
 The recordings are MPEG-TS, which no browser plays. Rather than ship a

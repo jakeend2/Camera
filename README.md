@@ -22,9 +22,20 @@ adapter. Everything IP-facing is the Pi.
   │                  │  Pelco-D, 9600 baud    │   FTDI FT232R                │
   └──────────────────┘                        │                              │
                                               │ USB SSD  (931 GB, boots here)│
-                                              │ eth0     (PoE switch, wired) │
-                                              └──────────────────────────────┘
+  ┌──────────────────┐                        │ eth0     (PoE switch, wired) │
+  │  Reolink 510A    │   H.264 over RTSP      │                              │
+  │  "backyard"      ├───── PoE / Cat5e ─────►│ (no capture hardware: it      │
+  │  2560x1920, PoE  │   already encoded      │  arrives ready to store)     │
+  └──────────────────┘                        └──────────────────────────────┘
 ```
+
+The two cameras cost wildly different amounts to record. The MIC arrives as
+analogue video, so every frame must be encoded on this Pi: about 150% of a
+core. The Reolink arrives already H.264, so ffmpeg copies the bitstream and
+rewrites only the container - about 4% of a core, for a stream at twice the
+bitrate. That asymmetry is why nothing is allowed to put a filter in the
+network camera's path, not even a timestamp overlay: any filter forces a full
+decode of 2560x1920 and the saving evaporates.
 
 Both USB devices are addressed by `/dev/serial/by-id/…` and `/dev/v4l/by-id/…`,
 never by `ttyUSB0` or `video0`. Those numbers are assigned in probe order, so a
@@ -224,6 +235,7 @@ drive the others.
    requirements.txt       flask, flask-login, pyserial, paho-mqtt, cheroot
                           ffmpeg and mosquitto are system packages
 
+   videos/<cid>/          one directory per camera; the day is the filename
    templates/             base.html, index.html, login.html,
                           recordings.html (file list), watch.html (player)
    static/                lcars.css, main.js and the vendored Antonio font.

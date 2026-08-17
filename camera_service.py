@@ -2457,10 +2457,18 @@ class MqttBridge:
     exactly as before; paho reconnects in the background on its own.
 
     Topics, all under MQTT_PREFIX:
-        <prefix>/status      online | offline   (retained, offline via LWT)
-        <prefix>/state       JSON health snapshot (retained)
-        <prefix>/ptz/set     subscribed: {"action": "pan_left"} or "pan_left"
-        <prefix>/ptz/result  outcome of the last command
+        <prefix>/status              online | offline (retained, LWT)
+        <prefix>/state               JSON health, whole service (retained)
+        <prefix>/<cid>/state         JSON health, one camera (retained)
+        <prefix>/<cid>/ptz/set       subscribed, per camera
+        <prefix>/<cid>/ptz/result    outcome of the last command
+        <prefix>/ptz/set             subscribed, means the primary camera
+        <prefix>/ptz/result          outcome, primary camera
+
+    The unqualified ptz topics are kept because anything already publishing
+    to them predates there being a second camera, and silently retargeting
+    an existing automation at a different device would be the worst possible
+    way to introduce one. They address the primary camera, explicitly.
     """
 
     def __init__(self, stop: threading.Event) -> None:
@@ -2501,14 +2509,37 @@ class MqttBridge:
         log.info("MQTT connected")
         client.publish(f"{MQTT_PREFIX}/status", "online", qos=1, retain=True)
         client.subscribe(f"{MQTT_PREFIX}/ptz/set", qos=1)
+        for cid in CAMERAS:
+            client.subscribe(f"{MQTT_PREFIX}/{cid}/ptz/set", qos=1)
         self._publish_state()
 
     def _on_disconnect(self, client, userdata, flags, reason_code, properties=None):
         if not self._stop.is_set():
             log.warning("MQTT disconnected (%s) - retrying", reason_code)
 
+    def _camera_for(self, topic: str):
+        """Which camera a command topic addresses.
+
+        <prefix>/<cid>/ptz/set names one; <prefix>/ptz/set means the primary.
+        """
+        parts = topic.split("/")
+        if len(parts) >= 4 and parts[1] in CAMERAS:
+            return CAMERAS[parts[1]], parts[1]
+        return primary(), primary().cid
+
     def _on_message(self, client, userdata, msg):
         try:
+            cam, cid = self._camera_for(msg.topic)
+            result_topic = (f"{MQTT_PREFIX}/{cid}/ptz/result"
+                            if msg.topic.startswith(f"{MQTT_PREFIX}/{cid}/")
+                            else f"{MQTT_PREFIX}/ptz/result")
+            why = ptz_camera_or_error(cam)
+            if why:
+                log.warning("MQTT PTZ for '%s' refused: %s", cid, why)
+                client.publish(result_topic,
+                               json.dumps({"ok": False, "error": why,
+                                           "cam": cid}), qos=0)
+                return
             raw = msg.payload.decode("utf-8", "replace").strip()
             speed = None
             if raw.startswith("{"):
@@ -2529,11 +2560,12 @@ class MqttBridge:
             else:
                 ok, err = execute_ptz(action, preset, speed)
             if not ok:
-                log.warning("MQTT PTZ '%s' rejected: %s",
-                            action, err or "serial write failed")
+                log.warning("MQTT PTZ '%s' on '%s' rejected: %s",
+                            action, cid, err or "serial write failed")
             client.publish(
-                f"{MQTT_PREFIX}/ptz/result",
-                json.dumps({"action": action, "ok": ok, "error": err}), qos=0
+                result_topic,
+                json.dumps({"action": action, "ok": ok, "error": err,
+                            "cam": cid}), qos=0
             )
         except Exception:
             log.exception("Unusable MQTT message on %s", msg.topic)
@@ -2548,6 +2580,13 @@ class MqttBridge:
         try:
             self._client.publish(f"{MQTT_PREFIX}/state",
                                  json.dumps(current_state()), qos=0, retain=True)
+            # One topic per camera as well, so a consumer can subscribe to the
+            # one it cares about rather than parsing the whole service out of
+            # a combined document.
+            for cam in CAMERAS.values():
+                self._client.publish(f"{MQTT_PREFIX}/{cam.cid}/state",
+                                     json.dumps(camera_state(cam)),
+                                     qos=0, retain=True)
         except Exception:
             log.exception("Could not publish MQTT state")
 
