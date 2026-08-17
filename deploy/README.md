@@ -12,7 +12,7 @@ something you invoke with `sudo` rather than something that happens by itself.
 ## What is running
 
 ```
-        OUTSIDE                    THE PI (192.168.1.125)
+        OUTSIDE                    THE PI (192.168.1.77)
   ┌──────────────┐        ┌────────────────────────────────┐
   │  Bosch       │        │  camera.service                │
   │  MIC 612     │        │    └─ ffmpeg  capture, encode,  │
@@ -31,7 +31,7 @@ something you invoke with `sudo` rather than something that happens by itself.
 |---|---|
 | Project root | `/opt/camera` — owned `pi:camera`; **pi** edits, **camera** runs |
 | Service account | `camera`, system user, `nologin`, no sudo |
-| Web UI | `https://192.168.1.125:5000`, user `admin` |
+| Web UI | `https://camera.<domain>:5000` (LAN `192.168.1.77`), user `admin` |
 | Recordings | `/opt/camera/videos/YYYY-MM-DD.ts`, 14-day retention |
 | Timezone | `America/New_York` — this defines when a "day" ends |
 
@@ -138,7 +138,7 @@ without echo, writes only the hash, and restarts the service.
 ### 4. TLS certificate
 
 ```bash
-sudo /opt/camera/deploy/make-cert.sh            # or: make-cert.sh 192.168.1.125
+sudo /opt/camera/deploy/make-cert.sh            # or: make-cert.sh 192.168.1.77
 ```
 
 Writes a self-signed cert to `/etc/camera-tls/` with the Pi's hostnames and
@@ -227,20 +227,67 @@ stale.
 Check it:
 
 ```bash
-ssh pi@192.168.1.125 "curl -4 -s https://api.ipify.org; echo; getent hosts yourname.dedyn.io"
+ssh pi@192.168.1.77 "curl -4 -s https://api.ipify.org; echo; getent hosts yourname.dedyn.io"
 ```
 
 Both lines must show the same address.
+
+## When the Pi's address changes
+
+Moving from WiFi to the PoE switch changed the Pi from `192.168.1.125` to
+`192.168.1.77`, and **five separate things were pinned to the old address**.
+The tunnel itself never broke; everything downstream of it did. In the order
+they bite:
+
+| What | Where | Symptom when stale |
+|---|---|---|
+| dnsmasq `host-record` | `/etc/dnsmasq.d/camera.conf` | LAN clients reach the wrong address |
+| dnsmasq `interface=` | same file | dnsmasq stops listening on the LAN entirely |
+| ufw forward rule | `ufw route ... out on <if>` | VPN clients cannot reach other LAN devices |
+| NAT masquerade | `/etc/ufw/before.rules` | VPN traffic is not translated |
+| **public A record** | deSEC zone for `camera.<domain>` | phones off-network get the dead address |
+
+The public DNS record is the one that hurts, because it is the only item not on
+the Pi, and its TTL (3600) means the stale answer survives in phone and resolver
+caches for an hour after you fix it. `ERR_ADDRESS_UNREACHABLE` on a phone whose
+tunnel is handshaking normally is this, essentially every time.
+
+To re-sync everything after an address change:
+
+```bash
+sudo /opt/camera/deploy/setup-dnsmasq.sh        # rewrites host-record + interface
+sudo /opt/camera/deploy/setup-wireguard.sh      # rewrites the ufw route + masquerade
+sudo /opt/camera/deploy/make-cert.sh            # only if using the self-signed cert
+```
+
+Then update the `camera` A record in the deSEC zone by hand, and re-do the
+router's DHCP reservation and port forward for the **new interface's MAC**.
+
+To confirm it took, from the Pi:
+
+```bash
+dig +short camera.<domain> @1.1.1.1      # public answer
+dig +short camera.<domain> @127.0.0.1    # what dnsmasq tells the LAN
+sudo nft list ruleset | grep -E 'masquerade|iifname "wg0"'
+```
+
+A better long-term shape is to point the public record at **`10.8.0.1`**, the
+Pi's WireGuard address. It is stable, means nothing outside the tunnel, keeps
+your internal addressing out of public resolvers, and never needs updating when
+the LAN address moves. dnsmasq keeps answering the LAN address locally.
+
+---
 
 ### 8. Router — the part that cannot be scripted
 
 Two changes on the router's admin page:
 
-**a) DHCP reservation** — pin the Pi to `192.168.1.125`. Its MAC is
-`dc:a6:32:68:af:bb`. Without this, a lease change breaks the TLS certificate
-and the port forward at the same time.
+**a) DHCP reservation** — pin the Pi to `192.168.1.77`. Its **eth0** MAC is
+`dc:a6:32:68:af:ba` (the wlan0 MAC `…:bb` is one lower — reserve the one that
+is actually carrying traffic). Without this, a lease change breaks the port
+forward and every address baked into config at the same time.
 
-**b) Port forward** — **UDP 51820 → 192.168.1.125**.
+**b) Port forward** — **UDP 51820 → 192.168.1.77**.
 
 > UDP, not TCP. WireGuard is UDP-only and a TCP rule does nothing at all.
 > This is the single most common reason the tunnel never handshakes.
@@ -261,9 +308,14 @@ Installs WireGuard, generates the server key, writes `/etc/wireguard/wg0.conf`,
 enables IP forwarding, opens the one UDP port, extends the existing service
 rules to the VPN subnet, adds a masquerade rule, and starts the tunnel.
 
-The LAN interface is detected from the default route rather than assumed to be
-`eth0` — **this Pi is on `wlan0`**, and most guides hardcode `eth0`, which
-silently breaks access to everything except the Pi itself.
+The LAN interface is detected from the default route rather than assumed, and
+that detection has now been proved twice over: the Pi ran on `wlan0` for most
+of this project and moved to `eth0` when the PoE switch arrived. Guides that
+hardcode either one silently break access to everything except the Pi itself.
+
+Detection only helps at the moment a script runs, though. These scripts are
+one-shot generators, so config written while the Pi was on `wlan0` kept naming
+`wlan0` afterwards — see *When the Pi's address changes* below.
 
 Then add a device:
 
@@ -279,8 +331,13 @@ Clients are **split tunnel**: only `192.168.1.0/24` and `10.8.0.0/24` route
 through the VPN, so ordinary browsing is untouched.
 
 To test properly, **turn WiFi off on the phone** so you are genuinely on
-cellular, connect, then browse to `https://192.168.1.125:5000` — the LAN
-address, because you are now inside the network.
+cellular, connect, then browse to the camera hostname — you are inside the
+network now, so it resolves to the Pi's LAN address.
+
+Set **`DNS = 10.8.0.1`** in the client's `[Interface]` section. Without it the
+phone resolves the camera name over cellular DNS and caches whatever public
+DNS said, which means an address change takes a full TTL to reach it. With it,
+the phone asks the Pi's own dnsmasq and always gets the current answer.
 
 Revoke a client by deleting its `# client: <name>` block from
 `/etc/wireguard/wg0.conf` and running:
@@ -355,7 +412,7 @@ sudo ufw status verbose
 systemctl list-timers desec-ddns.timer
 ```
 
-Health, once logged in: `https://192.168.1.125:5000/health`
+Health, once logged in: `https://192.168.1.77:5000/health`
 
 MQTT, watching everything the camera publishes:
 

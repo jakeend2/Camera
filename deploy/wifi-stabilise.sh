@@ -1,5 +1,11 @@
 #!/bin/bash
 #
+# SUPERSEDED - this Pi now runs on eth0 through a PoE switch and its WiFi is
+# disabled. Kept because the diagnosis is worth having if WiFi ever comes
+# back: the dropouts were 802.11v BSS Transition Management frames that the
+# brcmfmac firmware answers 'Unknown Frame', causing 11 re-associations in
+# 16 minutes between two weak DFS APs. Pinning the BSSID took signal 50->87.
+#
 # Stop wlan0 ping-ponging between two weak 5 GHz DFS access points.
 #
 # WHAT THE LOGS SHOWED
@@ -157,7 +163,7 @@ retried for up to 60 seconds. It reverts on its own if either fails.
 
 Wait about 90 seconds, then:
 
-    ssh pi@192.168.1.125 "/opt/camera/deploy/wifi-stabilise.sh --status"
+    ssh pi@192.168.1.77 "/opt/camera/deploy/wifi-stabilise.sh --status"
 
 Look for a line containing VERIFIED.
 EOF

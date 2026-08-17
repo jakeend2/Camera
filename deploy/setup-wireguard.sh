@@ -22,11 +22,14 @@ VPN_SUBNET="10.8.0.0/24"
 VPN_SERVER_IP="10.8.0.1/24"
 WG_DIR=/etc/wireguard
 
-# The LAN interface is whatever carries the default route. This Pi is on
-# wlan0, not eth0 - hardcoding the wrong one silently breaks NAT.
+# The LAN interface is whatever carries the default route. Do not hardcode
+# it: this Pi ran on wlan0 for months and moved to eth0 when a PoE switch
+# arrived. Naming the wrong one silently breaks NAT for every VPN client
+# while the tunnel itself keeps handshaking, which is a miserable debug.
 LAN_IF="$(ip route show default | awk '/default/{print $5; exit}')"
 [ -n "$LAN_IF" ] || { echo "Could not determine the LAN interface."; exit 1; }
-echo "LAN interface: $LAN_IF"
+LAN_IP="$(ip -o -f inet addr show "$LAN_IF" | awk '{print $4; exit}' | cut -d/ -f1)"
+echo "LAN interface: $LAN_IF ($LAN_IP)"
 
 echo "== installing packages =="
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq wireguard wireguard-tools qrencode
@@ -111,9 +114,11 @@ cat <<EOF
 ------------------------------------------------------------------
 Server is up. Two things remain, and neither can be done from here:
 
-1. On your router, forward UDP ${PORT} to 192.168.1.125.
-   Give this Pi a DHCP reservation at the same time - the TLS
-   certificate has its address baked in, so a change breaks both.
+1. On your router, forward UDP ${PORT} to ${LAN_IP}.
+   Give this Pi a DHCP reservation for ${LAN_IF} at the same time -
+   several things bake this address in, so a lease change breaks
+   them all at once. See 'When the Pi's address changes' in
+   deploy/README.md for the full list.
 
 2. Add a client:
      sudo /opt/camera/deploy/wireguard-add-client.sh phone

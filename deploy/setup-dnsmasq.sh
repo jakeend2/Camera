@@ -10,7 +10,8 @@
 #   the LAN resolves through the BGW320-500, and that gateway drops any public
 #   DNS answer containing an RFC1918 address - DNS rebinding protection, not
 #   configurable in its firewall settings. Verified: deSEC's own nameservers,
-#   1.1.1.1 and 8.8.8.8 all return 192.168.1.125; the gateway returns nothing.
+#   1.1.1.1 and 8.8.8.8 all return the Pi's LAN address; the gateway returns
+#   nothing.
 #
 #   dnsmasq answers for that one name locally and forwards everything else,
 #   so the name resolves and the certificate validates.

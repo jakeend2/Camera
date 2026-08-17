@@ -22,7 +22,7 @@ adapter. Everything IP-facing is the Pi.
   │                  │  Pelco-D, 9600 baud    │   FTDI FT232R                │
   └──────────────────┘                        │                              │
                                               │ USB SSD  (931 GB, boots here)│
-                                              │ wlan0    (2.4 GHz, pinned)   │
+                                              │ eth0     (PoE switch, wired) │
                                               └──────────────────────────────┘
 ```
 
