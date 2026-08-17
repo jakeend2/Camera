@@ -2,6 +2,7 @@
 
 {% block body %}
 <main class="app" id="app"
+      data-cam="{{ cam }}"
       data-diagonals="{{ 1 if diagonals else 0 }}"
       data-default-speed="{{ default_speed }}">
 
@@ -12,7 +13,8 @@
 
       <div class="status-strip">
         <span class="st-item" id="st-rec"><span class="st-dot" id="rec-dot"></span>REC</span>
-        <span class="st-item" id="st-img">IMG:?</span>
+        <span class="st-item" id="st-cam">&ndash;</span>
+        <span class="st-item" id="st-img" data-needs="ptz">IMG:?</span>
         <span class="st-item" id="st-link">LINK ·</span>
         <span class="st-item" id="st-spd">SPD {{ default_speed }}</span>
         <span class="st-spacer"></span>
@@ -31,7 +33,18 @@
   <!-- ================= CONTROLS ================= -->
   <aside class="rail">
 
-    <section class="rail-sec">
+    {% if cameras|length > 1 %}
+    <div class="seg cam-seg" id="cam-seg" role="group" aria-label="Camera">
+      {% for c in cameras %}
+      <button data-select-cam="{{ c.cid }}" data-ptz="{{ 1 if c.ptz else 0 }}"
+              data-aspect="{{ c.aspect }}"
+              aria-pressed="{{ 'true' if c.cid == cam else 'false' }}"
+              class="{{ 'active' if c.cid == cam }}">{{ c.name }}</button>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    <section class="rail-sec" data-needs="ptz">
       <h2 class="sec-title">MOTION</h2>
       <div class="motion-row">
         <div class="dpad-wrap">
@@ -67,21 +80,23 @@
     </section>
 
     <div class="quick-row">
-      <div class="seg" id="imager-seg" role="group" aria-label="Imager">
+      <div class="seg" id="imager-seg" role="group" aria-label="Imager"
+           data-needs="ptz">
         <button id="btn-vis"   data-cmd="/Visible_Light_Camera" aria-pressed="false">VIS</button>
         <button id="btn-therm" data-cmd="/Thermal_Camera"       aria-pressed="false">THERM</button>
       </div>
-      <button class="pill" id="btn-wiper" data-cmd="/Windshield_Wiper">WIPER</button>
+      <button class="pill" id="btn-wiper" data-cmd="/Windshield_Wiper"
+              data-needs="ptz">WIPER</button>
       <button class="pill" id="btn-snap">SNAP</button>
     </div>
 
     <nav class="tabs" id="tabs">
-      <button data-tab="presets" class="active">PRESETS</button>
-      <button data-tab="camera">CAM</button>
+      <button data-tab="presets" class="active" data-needs="ptz">PRESETS</button>
+      <button data-tab="camera" data-needs="ptz">CAM</button>
       <button data-tab="sys">SYS</button>
     </nav>
 
-    <section class="rail-sec tabpane active" data-pane="presets">
+    <section class="rail-sec tabpane active" data-pane="presets" data-needs="ptz">
       <h2 class="sec-title">PRESETS</h2>
       <div class="chip-row">
         <button class="chip" data-goto="1">1</button>
@@ -104,7 +119,7 @@
       functions and are refused.</p>
     </section>
 
-    <section class="rail-sec tabpane" data-pane="camera">
+    <section class="rail-sec tabpane" data-pane="camera" data-needs="ptz">
       <h2 class="sec-title">CAMERA</h2>
       <div class="chip-row">
         <button class="hold-btn pill" data-hold="iris_open">IRIS+</button>
@@ -128,8 +143,10 @@
       </dl>
       <div class="chip-row">
         <button class="pill" id="btn-save" data-cmd="/Start_New_File">SAVE REC</button>
-        <a class="pill pill-link" href="{{ url_for('watch') }}">PLAYBACK</a>
-        <a class="pill pill-link" href="{{ url_for('recordings') }}">FILES</a>
+        <a class="pill pill-link" id="link-watch"
+           href="{{ url_for('watch') }}">PLAYBACK</a>
+        <a class="pill pill-link" id="link-files"
+           href="{{ url_for('recordings') }}">FILES</a>
       </div>
       <div class="chip-row">
         <button class="pill pill-danger" id="btn-restart">RESTART SVC</button>

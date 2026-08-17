@@ -104,6 +104,10 @@ RECORD_FORMAT = "mpegts"
 PREVIEW_WIDTH = 640
 PREVIEW_FPS = 20             # matches CAPTURE_FPS; higher would only duplicate
 PREVIEW_QUALITY = 7          # mjpeg -q:v, 2 (best) .. 31 (worst)
+# How long a substream preview keeps running after the last viewer left.
+# Long enough that switching between cameras and back is instant, short
+# enough that nothing decodes video all night for an empty room.
+PREVIEW_LINGER = _env_int("PREVIEW_LINGER", 60)
 
 # Each camera records into VIDEO_ROOT/<cid>/. Subdirectories rather than
 # filename prefixes: the day then genuinely IS the whole filename within a
@@ -948,6 +952,137 @@ class Recorder:
             return self._proc is not None and self._proc.poll() is None
 
 
+class Preview:
+    """An on-demand MJPEG feed for a camera that cannot produce one itself.
+
+    The analog camera gets its preview free: one ffmpeg already decodes the
+    capture, so a second output costs only the MJPEG encode. A network camera
+    hands over H.264 that is copied to disk untouched, and putting any filter
+    in that path would force a full decode of the main stream - which is the
+    one thing this design refuses to do. So the preview comes from the
+    camera's own low-resolution substream in a separate process: 640x480 at
+    10fps, decoded and re-encoded to MJPEG for a couple of percent of a core.
+
+    It runs only while someone is watching, plus PREVIEW_LINGER seconds. That
+    matters less for CPU than for the camera: every RTSP session is a
+    resource on the device itself, and holding one open permanently for a
+    feed nobody is looking at is the kind of thing that eventually collides
+    with the recording.
+    """
+
+    def __init__(self, cam: "Camera") -> None:
+        self.cam = cam
+        self.cfg = cam.cfg
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+        self._proc: subprocess.Popen | None = None
+        self._stop = threading.Event()
+        self._last_want = 0.0
+        self.started_at: datetime | None = None
+
+    @property
+    def running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def want(self) -> None:
+        """Register interest. Starts the feed if it is not already up."""
+        self._last_want = time.monotonic()
+        if self.running:
+            return
+        with self._lock:
+            if self.running:
+                return
+            self._stop.clear()
+            self._thread = threading.Thread(
+                target=self._run, name=f"preview-{self.cam.cid}", daemon=True)
+            self._thread.start()
+            log.info("[%s] Preview starting (substream)", self.cam.cid)
+
+    def stop(self) -> None:
+        self._stop.set()
+        with self._lock:
+            proc = self._proc
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+
+    def _cmd(self) -> list[str]:
+        # No scale filter: the substream is natively 640x480, so asking for a
+        # resize would add work to no purpose.
+        return [
+            "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "warning",
+            *self.cfg.input_extra,
+            "-i", self.cfg.authed_url(self.cfg.preview_source or self.cfg.source),
+            "-an", "-vf", f"fps={self.cfg.preview_fps}",
+            "-c:v", "mjpeg", "-q:v", str(self.cfg.preview_quality),
+            "-f", "mjpeg", "pipe:1",
+        ]
+
+    def _idle(self) -> bool:
+        return time.monotonic() - self._last_want > PREVIEW_LINGER
+
+    def _run(self) -> None:
+        backoff = 2
+        try:
+            while not self._stop.is_set() and not self._idle():
+                try:
+                    proc = subprocess.Popen(
+                        self._cmd(), stdin=subprocess.DEVNULL,
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                        bufsize=0, cwd=str(BASE_DIR))
+                    _widen_pipe(proc.stdout)
+                except Exception:
+                    log.exception("[%s] Could not start the preview",
+                                  self.cam.cid)
+                    self._stop.wait(backoff)
+                    backoff = min(backoff * 2, self.cfg.backoff_max)
+                    continue
+
+                with self._lock:
+                    self._proc = proc
+                    self.started_at = datetime.now()
+                threading.Thread(target=self.cam.recorder._drain_stderr,
+                                 args=(proc,), daemon=True).start()
+
+                began = time.monotonic()
+                try:
+                    pump_preview(proc.stdout, self.cam.frames, self._idle_event())
+                except Exception:
+                    log.exception("[%s] Preview pump died", self.cam.cid)
+                Recorder._reap(proc)
+                if self._stop.is_set() or self._idle():
+                    break
+                ran = time.monotonic() - began
+                log.warning("[%s] Preview ended after %.0fs - restarting",
+                            self.cam.cid, ran)
+                backoff = 2 if ran > 60 else min(backoff * 2, self.cfg.backoff_max)
+                self._stop.wait(backoff)
+        finally:
+            with self._lock:
+                proc, self._proc = self._proc, None
+            if proc is not None and proc.poll() is None:
+                Recorder._reap(proc)
+            log.info("[%s] Preview stopped", self.cam.cid)
+
+    def _idle_event(self) -> threading.Event:
+        """An Event that becomes set when the feed should wind down.
+
+        pump_preview() takes a stop Event, and this feed has two reasons to
+        stop: an explicit shutdown, or nobody watching any more. A tiny
+        watcher thread bridges the second to the first.
+        """
+        ev = threading.Event()
+
+        def watch():
+            while not ev.is_set():
+                if self._stop.is_set() or self._idle() or shutdown.is_set():
+                    ev.set()
+                    return
+                time.sleep(1.0)
+
+        threading.Thread(target=watch, daemon=True).start()
+        return ev
+
+
 class Camera:
     """One camera and everything it owns.
 
@@ -968,6 +1103,8 @@ class Camera:
             self.video_dir, LOG_DIR / f"archive-index-{cfg.cid}.json")
         self.frames = FrameBuffer()
         self.recorder = Recorder(self)
+        # Only for cameras whose recording pipeline cannot also make a preview.
+        self.preview = (Preview(self) if cfg.preview == "substream" else None)
 
     def __repr__(self) -> str:
         return f"<Camera {self.cid} ({self.cfg.kind})>"
@@ -1039,7 +1176,11 @@ def camera_configs() -> list[CameraConfig]:
             aspect="4/3",           # 2560x1920 - not 16:9 like the MIC
             capabilities=frozenset(),   # fixed bullet: no motors
             backoff_max=30,
-            preview="none",         # Step 5 gives it a substream preview
+            # From the camera's own 640x480 substream in a separate
+            # process - the main stream is copied to disk untouched and
+            # must stay that way.
+            preview="substream",
+            preview_fps=10, preview_quality=8, preview_width=640,
             preview_source=_cam_env(
                 "backyard", "PREVIEW_SOURCE",
                 "rtsp://192.168.1.126:554/h264Preview_01_sub"),
@@ -1571,11 +1712,17 @@ def camera():
     if cam is None:
         return _no_such_camera(request.args.get("cam", ""))
     buf = cam.frames
+    if cam.preview is not None:
+        cam.preview.want()          # start it if nobody else is watching
 
     def stream():
         last = buf.seq - 1
         idle = 0
         while not shutdown.is_set():
+            # Re-register on every frame, so the feed stays up exactly as long
+            # as somebody is actually reading it.
+            if cam.preview is not None:
+                cam.preview.want()
             got = buf.wait_for(last, timeout=2.0)
             if got is None:
                 idle += 1
@@ -1683,6 +1830,13 @@ def snapshot():
     cam = _camera_arg()
     if cam is None:
         return _no_such_camera(request.args.get("cam", ""))
+    if cam.preview is not None:
+        cam.preview.want()
+        # A cold substream needs a moment to produce its first frame.
+        for _ in range(30):
+            if cam.frames.latest() is not None:
+                break
+            time.sleep(0.2)
     jpeg = cam.frames.latest()
     if jpeg is None:
         return make_response(jsonify({"ok": False, "error": "no frame yet"}), 503)
@@ -2247,6 +2401,9 @@ def camera_state(cam) -> dict:
         "ffmpeg_restarts": rec.restarts,
         "ffmpeg_started": rec.started_at.isoformat() if rec.started_at else None,
         "preview_frames": cam.frames.seq,
+        "preview_mode": cam.cfg.preview,
+        "preview_running": (cam.preview.running if cam.preview is not None
+                            else rec.alive),
         "current_file": current.name if exists else None,
         "current_size_gb": round(current.stat().st_size / 2**30, 2) if exists else 0,
         "retention_days": cam.cfg.retention_days,
@@ -2501,6 +2658,8 @@ def graceful_stop(stop_http: bool = True) -> None:
     # nothing. Doing this the other way round meant a stuck HTTP worker could
     # stop the recordings from ever being closed properly.
     for cam in CAMERAS.values():
+        if cam.preview is not None:
+            cam.preview.stop()
         log.info("Stopping recorder %s", cam.cid)
         try:
             cam.recorder.stop()

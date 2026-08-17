@@ -756,3 +756,50 @@ a { color: var(--blue); }
 
 .seek-row { margin-top: 10px; }
 .seek-row .chip { min-width: 58px; padding: 0 8px; font-size: 0.8rem; }
+
+/* ------------------------------------------------------- camera switcher -- */
+.cam-seg {
+  width: 100%;
+  margin-bottom: var(--pad);
+}
+
+.cam-seg button,
+.cam-seg a {
+  flex: 1;
+  border: none;
+  border-radius: 0;
+  min-height: var(--tap);
+  background: var(--panel);
+  color: var(--orange);
+  font-family: var(--font);
+  font-weight: 700;
+  font-size: 0.85rem;
+  letter-spacing: 0.06em;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+  padding: 0 10px;
+  cursor: pointer;
+}
+
+.cam-seg button + button,
+.cam-seg a + a { border-left: 2px solid var(--orange); }
+
+.cam-seg button.active,
+.cam-seg a.active { background: var(--orange); color: var(--black); }
+
+#st-cam { color: var(--orange); }
+
+/* The frame follows the selected camera's real aspect, so a 4:3 sensor is
+   pillarboxed inside its own shape rather than stranded in a 16:9 box. */
+.video-frame.ar-4x3 { aspect-ratio: 4 / 3; }
+.video-frame.ar-16x9 { aspect-ratio: 16 / 9; }
+
+@media (min-width: 1024px) {
+  .video-frame.ar-4x3 {
+    width: min(100%, calc((100vh - var(--header-h) - 2 * var(--pad)) * 4 / 3));
+  }
+}
+
+.watch .cam-seg { max-width: 420px; }

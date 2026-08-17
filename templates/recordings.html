@@ -6,6 +6,14 @@
     <h2 class="sec-title">RECORDING ARCHIVE</h2>
     <p class="rec-meta">{{ entries|length }} files &middot; {{ total_gb }} GB used
       &middot; {{ free_gb }} GB free &middot; kept {{ retention_days }} days</p>
+    {% if cameras|length > 1 %}
+    <div class="seg cam-seg" role="group" aria-label="Camera">
+      {% for c in cameras %}
+      <a href="{{ url_for('recordings', cam=c.cid) }}"
+         class="{{ 'active' if c.cid == cam }}">{{ c.name }}</a>
+      {% endfor %}
+    </div>
+    {% endif %}
     <a class="pill pill-link" href="{{ url_for('index') }}">&larr; BACK TO CAMERA</a>
     <a class="pill pill-link" href="{{ url_for('watch') }}">OPEN PLAYER</a>
   </div>
@@ -23,8 +31,10 @@
           <span class="rec-live">&#9679; recording</span>{% endif %}</td>
         <td class="num">{{ e.size_gb }} GB</td>
         <td class="rec-actions">
-          <a class="chip chip-go" href="{{ url_for('watch', day=e.day) }}">WATCH</a>
-          <a class="chip" href="{{ url_for('recording_file', name=e.name) }}">RAW</a>
+          <a class="chip chip-go"
+             href="{{ url_for('watch', day=e.day, cam=cam) }}">WATCH</a>
+          <a class="chip"
+             href="{{ url_for('recording_file', name=e.name, cam=cam) }}">RAW</a>
         </td>
       </tr>
       {% endfor %}

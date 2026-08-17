@@ -36,6 +36,105 @@
   if (!app) return;                       // login / archive page: clock only
 
   var DIAGONALS = app.dataset.diagonals === "1";
+
+  /* ---------------------------------------------------------- cameras --
+   * One feed at a time. The selection drives the live image, the health
+   * poll, every PTZ command and the archive links, and it is remembered so
+   * a reload comes back where you were. Sections that need motors carry
+   * data-needs="ptz" and are hidden for a camera that has none - hidden
+   * rather than disabled, because a dead PTZ pad on a fixed camera is just
+   * clutter that looks broken.
+   */
+  var feed = $("feed");
+
+  var camButtons = Array.prototype.slice.call(
+    document.querySelectorAll("[data-select-cam]"));
+  var currentCam = app.dataset.cam || "";
+  try {
+    var remembered = localStorage.getItem("selectedCam");
+    if (remembered && camButtons.some(function (b) {
+          return b.dataset.selectCam === remembered; })) {
+      currentCam = remembered;
+    }
+  } catch (e) {}
+
+  function camInfo(cid) {
+    var btn = camButtons.filter(function (b) {
+      return b.dataset.selectCam === cid; })[0];
+    return {
+      cid: cid,
+      ptz: !btn || btn.dataset.ptz === "1",   // single-camera page: assume yes
+      aspect: (btn && btn.dataset.aspect) || "16/9",
+      name: btn ? btn.textContent.trim() : cid
+    };
+  }
+
+  // Append ?cam= to any path, preserving an existing query string.
+  function withCam(path) {
+    if (!currentCam) return path;
+    return path + (path.indexOf("?") >= 0 ? "&" : "?") + "cam=" +
+           encodeURIComponent(currentCam);
+  }
+
+  function applyCamera(cid, reloadFeed) {
+    currentCam = cid;
+    try { localStorage.setItem("selectedCam", cid); } catch (e) {}
+    var info = camInfo(cid);
+
+    camButtons.forEach(function (b) {
+      var on = b.dataset.selectCam === cid;
+      b.classList.toggle("active", on);
+      b.setAttribute("aria-pressed", on ? "true" : "false");
+    });
+
+    // Motors decide what the rail shows.
+    document.querySelectorAll("[data-needs=\"ptz\"]").forEach(function (el) {
+      el.hidden = !info.ptz;
+    });
+    // With the PTZ tabs gone there is only one pane left; show it.
+    if (!info.ptz) {
+      document.querySelectorAll(".tabpane").forEach(function (p) {
+        p.classList.toggle("active", p.dataset.pane === "sys");
+      });
+      document.querySelectorAll("#tabs button").forEach(function (b) {
+        b.classList.toggle("active", b.dataset.tab === "sys");
+      });
+    }
+
+    var frame = $("video-frame");
+    if (frame) {
+      frame.classList.toggle("ar-4x3", info.aspect === "4/3");
+      frame.classList.toggle("ar-16x9", info.aspect !== "4/3");
+    }
+    var label = $("st-cam");
+    if (label) label.textContent = info.name;
+
+    ["link-watch", "link-files"].forEach(function (id) {
+      var a = $(id);
+      if (!a) return;
+      a.href = withCam(a.href.split("?")[0]);
+    });
+
+    if (reloadFeed !== false && feed) {
+      // Cache-bust so switching back to a camera restarts its stream rather
+      // than reattaching to a response the browser considers finished.
+      lastFrames = -1;
+      var src = withCam("/camera");
+      feed.src = src + (src.indexOf("?") >= 0 ? "&" : "?") +
+                 "_=" + Date.now();
+      var seg = $("st-link");
+      if (seg) { seg.textContent = "LINK ·"; seg.classList.remove("bad"); }
+    }
+    poll();
+  }
+
+  camButtons.forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      if (btn.dataset.selectCam !== currentCam) {
+        applyCamera(btn.dataset.selectCam, true);
+      }
+    });
+  });
   var speed = parseInt(localStorage.getItem("ptzSpeed"), 10)
               || parseInt(app.dataset.defaultSpeed, 10) || 25;
 
@@ -53,7 +152,7 @@
   }
 
   function postCmd(path, body) {
-    return fetch(path, {
+    return fetch(withCam(path), {
       method: "POST",
       credentials: "include",
       headers: { "content-type": "application/json" },
@@ -313,7 +412,7 @@
   // -------------------------------------------------------- health poll ---
   var lastFrames = -1;
   function poll() {
-    fetch("/health", { credentials: "include" })
+    fetch(withCam("/health"), { credentials: "include" })
       .then(function (r) { return r.json(); })
       .then(function (h) {
         var rec = $("rec-dot");
@@ -327,6 +426,10 @@
           lastFrames = h.preview_frames;
         }
         markImager(h.imager || "unknown");
+        if (h.preview_mode === "substream" && !h.preview_running) {
+          var s = $("st-link");
+          if (s) s.textContent = "LINK starting…";
+        }
         if ($("sys-file")) $("sys-file").textContent = h.current_file || "-";
         if ($("sys-size")) $("sys-size").textContent = h.current_size_gb + " GB";
         if ($("sys-archive")) $("sys-archive").textContent = h.archive_gb + " GB";
@@ -339,6 +442,11 @@
   }
   poll();
   setInterval(poll, 15000);
+
+  // Apply the remembered camera once everything above is wired.
+  if (camButtons.length) {
+    applyCamera(currentCam, currentCam !== app.dataset.cam);
+  }
 
   // ---------------------------------------------------------------- tabs --
   document.querySelectorAll("#tabs button").forEach(function (btn) {
@@ -392,7 +500,7 @@
   // ------------------------------------------------------------- system ---
   if ($("btn-snap")) $("btn-snap").addEventListener("click", function () {
     var a = document.createElement("a");
-    a.href = "/snapshot";
+    a.href = withCam("/snapshot");
     a.download = "";
     document.body.appendChild(a);
     a.click();
@@ -428,6 +536,26 @@
   var DAY_SECONDS = 86400;
 
   var day = root.dataset.day;
+  var watchCam = root.dataset.cam || "";
+
+  function camQ(path) {
+    if (!watchCam) return path;
+    return path + (path.indexOf("?") >= 0 ? "&" : "?") + "cam=" +
+           encodeURIComponent(watchCam);
+  }
+
+  // Switching camera on the archive page reloads it: the timeline, the
+  // segment list and every cached window belong to one camera, and
+  // rebuilding all of that in place is more code than a navigation.
+  document.querySelectorAll("#watch-cam-seg [data-select-cam]").forEach(
+    function (btn) {
+      btn.addEventListener("click", function () {
+        var cid = btn.dataset.selectCam;
+        if (cid === watchCam) return;
+        window.location.href = "/watch/" + encodeURIComponent(day) +
+                               "?cam=" + encodeURIComponent(cid);
+      });
+    });
   var data = null;            // last /timeline payload
   var windowStart = null;     // second-of-day the loaded window begins at
   var windowLength = 0;
@@ -525,7 +653,7 @@
 
   // ---------------------------------------------------------- load a day --
   function loadDay(which) {
-    return fetch("/timeline?day=" + encodeURIComponent(which),
+    return fetch(camQ("/timeline?day=" + encodeURIComponent(which)),
                  { credentials: "include" })
       .then(function (r) { return r.json(); })
       .then(function (j) {
@@ -621,8 +749,8 @@
     windowLength = w.length;
     pendingSeek = second - w.start;
     $("w-seg").textContent = w.name;
-    player.src = "/play?day=" + encodeURIComponent(day) +
-                 "&t=" + w.start.toFixed(1);
+    player.src = camQ("/play?day=" + encodeURIComponent(day) +
+                      "&t=" + w.start.toFixed(1));
     player.load();
     if (autoplay !== false) {
       var go = player.play();
@@ -647,7 +775,8 @@
    * read-only cache directory and a missing file should not look alike. */
   player.addEventListener("error", function () {
     if (windowStart === null) return;
-    fetch("/play?day=" + encodeURIComponent(day) + "&t=" + windowStart.toFixed(1),
+    fetch(camQ("/play?day=" + encodeURIComponent(day) +
+               "&t=" + windowStart.toFixed(1)),
           { credentials: "include" })
       .then(function (r) {
         if (r.ok) return null;                 // transient: it works now
@@ -776,8 +905,8 @@
     btn.textContent = "CUTTING…";
     flash("cutting " + hms(to - from) + "…");
 
-    var url = "/clip?day=" + encodeURIComponent(day) +
-              "&from=" + from + "&to=" + to;
+    var url = camQ("/clip?day=" + encodeURIComponent(day) +
+                   "&from=" + from + "&to=" + to);
     // Fetched rather than linked so a failure surfaces as a message instead
     // of replacing the page with JSON.
     fetch(url, { credentials: "include" })
@@ -792,7 +921,8 @@
         var href = URL.createObjectURL(res.blob);
         var a = document.createElement("a");
         a.href = href;
-        a.download = "cam-" + day + "-" + hms(from).replace(/:/g, "") + ".mp4";
+        a.download = (watchCam || "cam") + "-" + day + "-" +
+                   hms(from).replace(/:/g, "") + ".mp4";
         document.body.appendChild(a);
         a.click();
         a.remove();
