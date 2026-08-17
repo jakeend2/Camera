@@ -30,6 +30,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import urllib.parse
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -112,7 +113,12 @@ PREVIEW_QUALITY = 7          # mjpeg -q:v, 2 (best) .. 31 (worst)
 VIDEO_ROOT = BASE_DIR / "videos"
 VIDEO_DIR = VIDEO_ROOT          # rebound to the primary camera in main()
 LOG_DIR = BASE_DIR / "logs"
-RETENTION_DAYS = _env_int("RETENTION_DAYS", 14)
+# Both cameras keep the same window, so a day of footage always has both
+# angles or neither - a mismatch is worse than a shorter archive, because
+# you go looking for the other view of an incident and it is simply gone.
+# 7 days of MIC (~30 GB/day) plus 7 of the 5 MP Reolink (58 GB/day) is
+# about 616 GB against a ~808 GB budget.
+RETENTION_DAYS = _env_int("RETENTION_DAYS", 7)
 MIN_FREE_GB = _env_int("MIN_FREE_GB", 50)   # floor; oldest whole days go first
 
 
@@ -170,10 +176,42 @@ class CameraConfig:
     backoff_max: int = 60
     noise: tuple = ()
     input_extra: tuple = ()
+    # Credentials for a network source. Kept apart from `source` so the URL
+    # can be logged and repr'd without them, and so they can come from the
+    # environment while the URL stays in code.
+    user: str = ""
+    password: str = ""
+    # "split"     - one ffmpeg produces recording and preview (analog capture)
+    # "substream" - a second process transcodes a low-res stream for preview
+    # "none"      - no live preview for this camera
+    preview: str = "split"
+    preview_source: str = ""
 
     @property
     def has_ptz(self) -> bool:
         return "ptz" in self.capabilities
+
+    @property
+    def secrets(self) -> tuple:
+        """Strings that must never reach a log or an error page."""
+        return tuple(s for s in (self.password,
+                                 urllib.parse.quote(self.password, safe=""))
+                     if s)
+
+    def authed_url(self, url: str = "") -> str:
+        """A source URL with credentials inserted, percent-encoded.
+
+        The password here contains shell metacharacters on this deployment,
+        which is exactly why it is never interpolated into a shell string -
+        ffmpeg is exec'd with an argument list, so quoting never applies.
+        """
+        url = url or self.source
+        if not self.user or "://" not in url:
+            return url
+        scheme, _, rest = url.partition("://")
+        creds = (urllib.parse.quote(self.user, safe="") + ":"
+                 + urllib.parse.quote(self.password, safe=""))
+        return f"{scheme}://{creds}@{rest}"
 
 # Addressed by the adapter's own serial number, not by enumeration order.
 # /dev/ttyUSB0 is first-come-first-served: plug in any other USB serial device
@@ -698,26 +736,62 @@ class Recorder:
                     VIDEO_DEVICE, VIDEO_DEVICE_FALLBACK)
         return VIDEO_DEVICE_FALLBACK
 
-    def _cmd(self) -> list[str]:
-        # stdin stays open on purpose: writing 'q' is the only way to make
-        # ffmpeg close its output files cleanly. SIGTERM makes it exit at once.
+    @property
+    def wants_preview(self) -> bool:
+        """True when this recorder's ffmpeg also writes MJPEG to stdout."""
+        return self.cfg.preview == "split"
+
+    def _segment_args(self) -> list[str]:
+        """The daily-file arguments, identical for every source."""
         return [
-            "ffmpeg", "-hide_banner", "-loglevel", "warning",
-            "-f", "v4l2", "-input_format", "mjpeg",
-            "-video_size", CAPTURE_SIZE, "-framerate", str(CAPTURE_FPS),
-            "-i", self._video_device(),
-            "-filter_complex", self._filter_complex(),
-            # One file per calendar day, cut exactly at local midnight.
-            "-map", "[recout]",
-            *RECORD_ENCODER,
-            "-b:v", RECORD_BITRATE, "-g", str(GOP_FRAMES),
             "-f", "segment",
             "-segment_time", "86400",
             "-segment_atclocktime", "1",
             "-segment_format", RECORD_FORMAT,
             "-strftime", "1",
+            # Load-bearing: it restarts each segment near PTS 0, which keeps
+            # 86400s inside the 33-bit 90 kHz MPEG-TS wrap window (~95443s).
+            # This is the only reason 24-hour files work at all.
             "-reset_timestamps", "1",
             str(self.cam.video_dir / f"%Y-%m-%d.{RECORD_EXT}"),
+        ]
+
+    def _rtsp_cmd(self) -> list[str]:
+        """Record a network camera that already speaks H.264.
+
+        No filter graph of any kind. drawtext and split operate on decoded
+        frames, so the presence of ANY filter forces a full decode of a
+        2560x1920 stream - which alone would exceed what this Pi has left.
+        With -c copy the bitstream is written through untouched and the cost
+        is I/O, not CPU. The camera burns its own timestamp in firmware, and
+        the archive index derives wall-clock from file birth time rather than
+        from the picture, so nothing needs an overlay from us.
+        """
+        return [
+            "ffmpeg", "-hide_banner", "-loglevel", "warning",
+            *self.cfg.input_extra,
+            "-i", self.cfg.authed_url(),
+            "-map", "0:v:0", "-c:v", "copy", "-an",
+            *self._segment_args(),
+        ]
+
+    def _cmd(self) -> list[str]:
+        if self.cfg.kind == "rtsp":
+            return self._rtsp_cmd()
+        # stdin stays open on purpose: writing 'q' is the only way to make
+        # ffmpeg close its output files cleanly. SIGTERM makes it exit at once.
+        return [
+            "ffmpeg", "-hide_banner", "-loglevel", "warning",
+            "-f", "v4l2", "-input_format", "mjpeg",
+            "-video_size", self.cfg.capture_size,
+            "-framerate", str(self.cfg.capture_fps),
+            "-i", self._video_device(),
+            "-filter_complex", self._filter_complex(),
+            # One file per calendar day, cut exactly at local midnight.
+            "-map", "[recout]",
+            *RECORD_ENCODER,
+            "-b:v", self.cfg.record_bitrate, "-g", str(GOP_FRAMES),
+            *self._segment_args(),
             # Low-rate preview for the browser.
             "-map", "[prvout]",
             "-c:v", "mjpeg", "-q:v", str(PREVIEW_QUALITY), "-f", "mjpeg", "pipe:1",
@@ -746,10 +820,20 @@ class Recorder:
         today.rename(alt)
         log.error("Over 99 same-day restarts; kept %s as %s", today.name, alt.name)
 
+    def _scrub(self, text: str) -> str:
+        """Remove anything secret before it reaches a log.
+
+        ffmpeg echoes its input URL in several error messages, and that URL
+        carries the camera's password.
+        """
+        for secret in self.cfg.secrets:
+            text = text.replace(secret, "***")
+        return text
+
     def _drain_stderr(self, proc: subprocess.Popen) -> None:
         suppressed = 0
         for raw in iter(proc.stderr.readline, b""):
-            line = raw.decode("utf-8", "replace").strip()
+            line = self._scrub(raw.decode("utf-8", "replace").strip())
             if not line:
                 continue
             if any(noise in line for noise in FFMPEG_NOISE):
@@ -766,15 +850,23 @@ class Recorder:
             self._preserve_todays_file()
 
             cmd = self._cmd()
-            log.info("Starting ffmpeg (%s @ %s fps, %s)",
-                     CAPTURE_SIZE, CAPTURE_FPS, RECORD_BITRATE)
+            if self.cfg.kind == "rtsp":
+                log.info("[%s] Starting ffmpeg (rtsp, copy, no re-encode)",
+                         self.cam.cid)
+            else:
+                log.info("[%s] Starting ffmpeg (%s @ %s fps, %s)", self.cam.cid,
+                         self.cfg.capture_size, self.cfg.capture_fps,
+                         self.cfg.record_bitrate)
             try:
                 proc = subprocess.Popen(
                     cmd, stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    stdout=(subprocess.PIPE if self.wants_preview
+                            else subprocess.DEVNULL),
+                    stderr=subprocess.PIPE,
                     bufsize=0, cwd=str(BASE_DIR),
                 )
-                _widen_pipe(proc.stdout)
+                if self.wants_preview:
+                    _widen_pipe(proc.stdout)
             except Exception:
                 log.exception("Could not launch ffmpeg")
                 self._stop.wait(backoff)
@@ -789,10 +881,16 @@ class Recorder:
                              daemon=True).start()
 
             began = time.monotonic()
-            try:
-                pump_preview(proc.stdout, self._buf, self._stop)
-            except Exception:
-                log.exception("Preview pump died")
+            if self.wants_preview:
+                try:
+                    pump_preview(proc.stdout, self._buf, self._stop)
+                except Exception:
+                    log.exception("[%s] Preview pump died", self.cam.cid)
+            else:
+                # Nothing to read: this ffmpeg writes only to disk. Poll so a
+                # stop request is still noticed promptly.
+                while proc.poll() is None and not self._stop.is_set():
+                    self._stop.wait(1.0)
 
             rc = self._reap(proc)
             if self._stop.is_set():
@@ -800,9 +898,10 @@ class Recorder:
 
             ran = time.monotonic() - began
             self.restarts += 1
-            log.error("ffmpeg exited rc=%s after %.0fs - restarting", rc, ran)
+            log.error("[%s] ffmpeg exited rc=%s after %.0fs - restarting",
+                      self.cam.cid, rc, ran)
             # A long run means the failure was transient; reset the backoff.
-            backoff = 2 if ran > 60 else min(backoff * 2, 60)
+            backoff = 2 if ran > 60 else min(backoff * 2, self.cfg.backoff_max)
             self._stop.wait(backoff)
 
     @staticmethod
@@ -911,6 +1010,41 @@ def camera_configs() -> list[CameraConfig]:
                                     "osd", "tour"}),
             backoff_max=60,
             noise=FFMPEG_NOISE,
+            preview="split",
+        ),
+        CameraConfig(
+            cid="backyard", name="Backyard", kind="rtsp",
+            # No credentials in the URL: they come from the environment and
+            # are inserted, percent-encoded, only when the command is built.
+            source=_cam_env("backyard", "SOURCE",
+                            "rtsp://192.168.1.126:554/h264Preview_01_main"),
+            user=_cam_env("backyard", "USER", ""),
+            password=_cam_env("backyard", "PASS", ""),
+            # -timeout, NOT -stimeout: verified against this ffmpeg build
+            # (5.1.9). Getting it wrong either makes ffmpeg refuse to start
+            # (loud) or leaves a black-holed socket hanging forever with the
+            # supervisor never seeing an exit (silent, and much worse).
+            # TCP because a dropped UDP packet under -c copy is corruption
+            # written straight into the archive.
+            input_extra=tuple(_cam_env(
+                "backyard", "INPUT_EXTRA",
+                "-rtsp_transport tcp -timeout 5000000").split()),
+            encode=False,           # already h264 High - copy, ~free
+            overlay_timestamp=False,  # firmware OSD; a filter would force a decode
+            retention_days=_cam_env_int("backyard", "RETENTION_DAYS",
+                                        RETENTION_DAYS),
+            # Measured: 5.35 Mbit/s, 2560x1920 at 25fps, GOP 2.0s.
+            play_window_seconds=_cam_env_int("backyard",
+                                             "PLAY_WINDOW_SECONDS", 60),
+            aspect="4/3",           # 2560x1920 - not 16:9 like the MIC
+            capabilities=frozenset(),   # fixed bullet: no motors
+            backoff_max=30,
+            preview="none",         # Step 5 gives it a substream preview
+            preview_source=_cam_env(
+                "backyard", "PREVIEW_SOURCE",
+                "rtsp://192.168.1.126:554/h264Preview_01_sub"),
+            noise=("RTP: missed", "max delay reached", "Non-monotonous DTS",
+                   "first_dts"),
         ),
     ]
 
@@ -918,7 +1052,15 @@ def camera_configs() -> list[CameraConfig]:
 def build_cameras() -> None:
     """Create every camera's object graph and its directory on disk."""
     global VIDEO_DIR, frames, recorder, archive
+    wanted = [c.strip() for c in _env("CAMERAS", "").split(",") if c.strip()]
     for cfg in camera_configs():
+        if wanted and cfg.cid not in wanted:
+            log.info("Camera %s defined but not in CAMERAS - skipping", cfg.cid)
+            continue
+        if cfg.kind == "rtsp" and not cfg.password:
+            log.error("Camera %s has no password (set CAM_%s_PASS) - skipping",
+                      cfg.cid, cfg.cid.upper())
+            continue
         cam = Camera(cfg)
         cam.video_dir.mkdir(parents=True, exist_ok=True)
         CAMERAS[cfg.cid] = cam
