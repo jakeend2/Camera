@@ -16,6 +16,7 @@ browsers and owns the RS-485 link for Pelco-D PTZ commands.
 
 from __future__ import annotations
 
+import faulthandler
 import fcntl
 import json
 import logging
@@ -29,6 +30,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -102,10 +104,76 @@ PREVIEW_WIDTH = 640
 PREVIEW_FPS = 20             # matches CAPTURE_FPS; higher would only duplicate
 PREVIEW_QUALITY = 7          # mjpeg -q:v, 2 (best) .. 31 (worst)
 
-VIDEO_DIR = BASE_DIR / "videos"
+# Each camera records into VIDEO_ROOT/<cid>/. Subdirectories rather than
+# filename prefixes: the day then genuinely IS the whole filename within a
+# camera's directory, so DAY_FILE_RE, day_of() and the .partNN convention
+# all keep working untouched, and two cameras can never collide on
+# "2026-08-16.ts" in a probe cache keyed by bare basename.
+VIDEO_ROOT = BASE_DIR / "videos"
+VIDEO_DIR = VIDEO_ROOT          # rebound to the primary camera in main()
 LOG_DIR = BASE_DIR / "logs"
 RETENTION_DAYS = _env_int("RETENTION_DAYS", 14)
 MIN_FREE_GB = _env_int("MIN_FREE_GB", 50)   # floor; oldest whole days go first
+
+
+def _cam_env(cid: str, key: str, default: str, legacy: str = "") -> str:
+    """Per-camera setting, falling back to the old flat key then the default.
+
+    The flat form is what /etc/camera-service.env already contains for the
+    original camera, written by install.sh. Honouring it means the existing
+    deployment keeps working with no edit to that file.
+    """
+    value = os.environ.get(f"CAM_{cid.upper()}_{key}", "").strip()
+    if not value and legacy:
+        value = os.environ.get(legacy, "").strip()
+    return value or default
+
+
+def _cam_env_int(cid: str, key: str, default: int, legacy: str = "") -> int:
+    try:
+        return int(_cam_env(cid, key, str(default), legacy))
+    except ValueError:
+        return default
+
+
+@dataclass(frozen=True)
+class CameraConfig:
+    """Everything that differs between one camera and another.
+
+    Defaults describe this deployment's hardware, matching the project's
+    existing habit: the service runs correctly unconfigured, and nothing here
+    needs editing to move machines - that is what the env overrides are for.
+    """
+    cid: str                          # short id; names its directory and URLs
+    name: str                         # what the UI shows
+    kind: str                         # "v4l2" (analog capture) or "rtsp"
+    source: str
+    source_fallback: str = ""
+    # Capture geometry only means anything for a local device; a remote
+    # encoder decides its own and ignores anything we ask for.
+    capture_size: str = "1280x720"
+    capture_fps: int = 20
+    # False when the source already delivers H.264: ffmpeg copies the
+    # bitstream and costs almost nothing. Note that ANY filter - including a
+    # drawtext overlay - forces a full decode and throws that away.
+    encode: bool = True
+    record_fps: int = 10
+    record_bitrate: str = "2500k"
+    overlay_timestamp: bool = True
+    retention_days: int = 14
+    preview_width: int = 640
+    preview_fps: int = 20
+    preview_quality: int = 7
+    play_window_seconds: int = 120
+    aspect: str = "16/9"
+    capabilities: frozenset = frozenset()
+    backoff_max: int = 60
+    noise: tuple = ()
+    input_extra: tuple = ()
+
+    @property
+    def has_ptz(self) -> bool:
+        return "ptz" in self.capabilities
 
 # Addressed by the adapter's own serial number, not by enumeration order.
 # /dev/ttyUSB0 is first-come-first-served: plug in any other USB serial device
@@ -284,6 +352,17 @@ class FrameBuffer:
                 return None
             return self._seq, self._frame
 
+    def wake(self) -> None:
+        """Release every waiting reader without publishing a frame.
+
+        Used at shutdown: a preview generator parked in wait_for() holds a
+        cheroot worker thread, and cheroot's stop() waits on its workers. One
+        browser tab watching the live feed was enough to stall shutdown until
+        systemd lost patience and SIGKILLed the service mid-write.
+        """
+        with self._cond:
+            self._cond.notify_all()
+
     def latest(self) -> bytes | None:
         """The most recent frame without waiting, or None before first frame."""
         with self._cond:
@@ -351,9 +430,6 @@ def day_of(path: Path):
         return None
 
 
-INDEX_FILE = LOG_DIR / "archive-index.json"
-
-
 class ArchiveIndex:
     """Wall-clock map of the recordings on disk.
 
@@ -380,17 +456,34 @@ class ArchiveIndex:
 
     TTL = 5.0            # seconds before a refresh re-examines the directory
 
-    def __init__(self) -> None:
+    def __init__(self, video_dir: Path, index_file: Path) -> None:
+        # One index per camera, over one directory, persisted to its own file.
+        # Sharing either across cameras silently mis-attributes footage: the
+        # probe cache is keyed on bare filename and both cameras produce
+        # "2026-08-16.ts", and the overlap-trim below would clamp one camera's
+        # segment against the other's.
+        self._video_dir = video_dir
+        self._index_file = index_file
         self._lock = threading.Lock()
         self._probe_cache: dict[str, tuple] = {}
         self._segments: list[dict] = []
         self._checked = 0.0
         self._load()
 
+    @property
+    def index_file(self) -> Path:
+        """Where this camera's probe cache is persisted."""
+        return self._index_file
+
+    @property
+    def video_dir(self) -> Path:
+        """The directory this index describes."""
+        return self._video_dir
+
     # -- persistence --------------------------------------------------------
     def _load(self) -> None:
         try:
-            raw = json.loads(INDEX_FILE.read_text())
+            raw = json.loads(self._index_file.read_text())
             self._probe_cache = {k: tuple(v) for k, v in raw.items()}
             log.info("Archive index: %d cached probes", len(self._probe_cache))
         except FileNotFoundError:
@@ -400,10 +493,10 @@ class ArchiveIndex:
 
     def _save(self) -> None:
         try:
-            INDEX_FILE.parent.mkdir(parents=True, exist_ok=True)
-            tmp = INDEX_FILE.with_suffix(".tmp")
+            self._index_file.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._index_file.with_suffix(".tmp")
             tmp.write_text(json.dumps(self._probe_cache))
-            tmp.replace(INDEX_FILE)
+            tmp.replace(self._index_file)
         except Exception:
             log.warning("Could not persist the archive index", exc_info=True)
 
@@ -453,7 +546,7 @@ class ArchiveIndex:
             if not force and now - self._checked < self.TTL:
                 return
             self._checked = now
-            paths = sorted(VIDEO_DIR.glob("*." + RECORD_EXT))
+            paths = sorted(self._video_dir.glob("*." + RECORD_EXT))
             births = self._birth_times(paths)
             if paths and not births:
                 log.warning("No birth times available - archive times will be "
@@ -566,14 +659,13 @@ class ArchiveIndex:
         return datetime.combine(day, datetime.min.time()).timestamp()
 
 
-archive = ArchiveIndex()
-
-
 class Recorder:
     """Owns the ffmpeg subprocess and keeps it running."""
 
-    def __init__(self, buf: FrameBuffer) -> None:
-        self._buf = buf
+    def __init__(self, cam: "Camera") -> None:
+        self.cam = cam
+        self.cfg = cam.cfg
+        self._buf = cam.frames
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self._proc: subprocess.Popen | None = None
@@ -625,22 +717,22 @@ class Recorder:
             "-segment_format", RECORD_FORMAT,
             "-strftime", "1",
             "-reset_timestamps", "1",
-            str(VIDEO_DIR / f"%Y-%m-%d.{RECORD_EXT}"),
+            str(self.cam.video_dir / f"%Y-%m-%d.{RECORD_EXT}"),
             # Low-rate preview for the browser.
             "-map", "[prvout]",
             "-c:v", "mjpeg", "-q:v", str(PREVIEW_QUALITY), "-f", "mjpeg", "pipe:1",
         ]
 
     # -- lifecycle --------------------------------------------------------
-    @staticmethod
-    def _preserve_todays_file() -> None:
+    def _preserve_todays_file(self) -> None:
         """ffmpeg would truncate an existing file for today, so rename it first."""
         stamp = f"{date.today():%Y-%m-%d}"
-        today = VIDEO_DIR / f"{stamp}.{RECORD_EXT}"
+        video_dir = self.cam.video_dir
+        today = video_dir / f"{stamp}.{RECORD_EXT}"
         if not today.exists():
             return
         for n in range(1, 100):
-            alt = VIDEO_DIR / f"{stamp}.part{n:02d}.{RECORD_EXT}"
+            alt = video_dir / f"{stamp}.part{n:02d}.{RECORD_EXT}"
             if not alt.exists():
                 today.rename(alt)
                 log.info("Kept earlier recording for today as %s", alt.name)
@@ -650,7 +742,7 @@ class Recorder:
         # muxer, which opens it O_TRUNC and destroys the whole accumulated day.
         # DAY_FILE_RE matches part\d+, so a unix stamp stays parseable and the
         # archive index still attributes it to the right day.
-        alt = VIDEO_DIR / f"{stamp}.part{int(time.time())}.{RECORD_EXT}"
+        alt = video_dir / f"{stamp}.part{int(time.time())}.{RECORD_EXT}"
         today.rename(alt)
         log.error("Over 99 same-day restarts; kept %s as %s", today.name, alt.name)
 
@@ -670,7 +762,7 @@ class Recorder:
     def run(self) -> None:
         backoff = 2
         while not self._stop.is_set():
-            VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+            self.cam.video_dir.mkdir(parents=True, exist_ok=True)
             self._preserve_todays_file()
 
             cmd = self._cmd()
@@ -757,37 +849,151 @@ class Recorder:
             return self._proc is not None and self._proc.poll() is None
 
 
+class Camera:
+    """One camera and everything it owns.
+
+    Nothing mutable is shared between cameras. That is deliberate rather than
+    tidy: the three worst ways this could go wrong - one camera's archive
+    index trimming another's segments, a probe cache collision on identical
+    day filenames, and a playback window cache serving the wrong camera's
+    video with a cheerful 200 - are all silent wrong-data failures. Giving
+    each camera its own directory, index and cache makes them impossible by
+    construction instead of merely absent.
+    """
+
+    def __init__(self, cfg: CameraConfig) -> None:
+        self.cfg = cfg
+        self.cid = cfg.cid
+        self.video_dir = VIDEO_ROOT / cfg.cid
+        self.index = ArchiveIndex(
+            self.video_dir, LOG_DIR / f"archive-index-{cfg.cid}.json")
+        self.frames = FrameBuffer()
+        self.recorder = Recorder(self)
+
+    def __repr__(self) -> str:
+        return f"<Camera {self.cid} ({self.cfg.kind})>"
+
+
+CAMERAS: dict[str, Camera] = {}
+PRIMARY_CAMERA_ID = _env("PRIMARY_CAMERA", "mic612")
+
+
+def primary() -> Camera:
+    """The camera the un-parameterised routes still refer to."""
+    return CAMERAS[PRIMARY_CAMERA_ID]
+
+
+def camera_configs() -> list[CameraConfig]:
+    """The cameras this host runs, in display order."""
+    return [
+        CameraConfig(
+            cid="mic612", name="MIC 612", kind="v4l2",
+            source=_cam_env("mic612", "SOURCE", VIDEO_DEVICE,
+                            legacy="VIDEO_DEVICE"),
+            source_fallback=VIDEO_DEVICE_FALLBACK,
+            capture_size=_cam_env("mic612", "CAPTURE_SIZE", CAPTURE_SIZE,
+                                  legacy="CAPTURE_SIZE"),
+            capture_fps=_cam_env_int("mic612", "CAPTURE_FPS", CAPTURE_FPS,
+                                     legacy="CAPTURE_FPS"),
+            encode=True,                      # analog in: there is no choice
+            record_fps=_cam_env_int("mic612", "RECORD_FPS", RECORD_FPS,
+                                    legacy="RECORD_FPS"),
+            record_bitrate=_cam_env("mic612", "RECORD_BITRATE", RECORD_BITRATE,
+                                    legacy="RECORD_BITRATE"),
+            overlay_timestamp=True,           # nothing else stamps this camera
+            retention_days=_cam_env_int("mic612", "RETENTION_DAYS",
+                                        RETENTION_DAYS, legacy="RETENTION_DAYS"),
+            preview_width=PREVIEW_WIDTH, preview_fps=PREVIEW_FPS,
+            preview_quality=PREVIEW_QUALITY,
+            play_window_seconds=PLAY_WINDOW_SECONDS,
+            aspect="16/9",
+            capabilities=frozenset({"ptz", "presets", "imager", "wiper",
+                                    "osd", "tour"}),
+            backoff_max=60,
+            noise=FFMPEG_NOISE,
+        ),
+    ]
+
+
+def build_cameras() -> None:
+    """Create every camera's object graph and its directory on disk."""
+    global VIDEO_DIR, frames, recorder, archive
+    for cfg in camera_configs():
+        cam = Camera(cfg)
+        cam.video_dir.mkdir(parents=True, exist_ok=True)
+        CAMERAS[cfg.cid] = cam
+        log.info("Camera %-10s %-14s -> %s (retention %dd, %s)",
+                 cfg.cid, cfg.kind, cam.video_dir, cfg.retention_days,
+                 "encode" if cfg.encode else "copy")
+    if PRIMARY_CAMERA_ID not in CAMERAS:
+        raise SystemExit(f"PRIMARY_CAMERA '{PRIMARY_CAMERA_ID}' is not defined")
+    # The routes still speak in terms of a single camera; point the names they
+    # use at the primary one until Step 3 parameterises them.
+    cam = primary()
+    VIDEO_DIR = cam.video_dir
+    frames = cam.frames
+    recorder = cam.recorder
+    archive = cam.index
+
+
 # ---------------------------------------------------------------------------
 # Retention - whole calendar days, keyed off the filename not mtime
 # ---------------------------------------------------------------------------
 def purge_old_recordings() -> None:
+    """Drop each camera's recordings past its own retention window."""
     today = date.today()
-    cutoff = today - timedelta(days=RETENTION_DAYS)
-    for path in sorted(VIDEO_DIR.glob(f"*.{RECORD_EXT}")):
-        day = day_of(path)
-        if day is None or day >= today:
-            continue                  # unrecognised names and today are safe
-        if day < cutoff:
-            try:
-                size = path.stat().st_size
-                path.unlink()
-                log.info("Retention: removed %s (%.1f GB, %d days old)",
-                         path.name, size / 2**30, (today - day).days)
-            except OSError as exc:
-                log.error("Could not remove %s: %s", path.name, exc)
+    for cam in CAMERAS.values():
+        cutoff = today - timedelta(days=cam.cfg.retention_days)
+        for path in sorted(cam.video_dir.glob(f"*.{RECORD_EXT}")):
+            day = day_of(path)
+            if day is None or day >= today:
+                continue              # unrecognised names and today are safe
+            if day < cutoff:
+                # Per-file, so one EACCES cannot abort the pass and with it
+                # the enforce_free_space() call that follows.
+                try:
+                    size = path.stat().st_size
+                    path.unlink()
+                    log.info("Retention[%s]: removed %s (%.1f GB, %d days old)",
+                             cam.cid, path.name, size / 2**30,
+                             (today - day).days)
+                except OSError as exc:
+                    log.error("Could not remove %s: %s", path.name, exc)
+
+
+def stray_recording_dirs() -> list[Path]:
+    """Directories under videos/ that no registered camera owns.
+
+    Retention cannot delete what it cannot see, but the disk still charges
+    for it - so an orphan left by a renamed or removed camera would be paid
+    for by deleting a live camera's footage instead. Report them loudly
+    rather than deleting anything automatically.
+    """
+    if not VIDEO_ROOT.exists():
+        return []
+    known = {cam.video_dir.name for cam in CAMERAS.values()}
+    return [d for d in VIDEO_ROOT.iterdir()
+            if d.is_dir() and d.name not in known]
 
 
 def enforce_free_space() -> None:
     today = date.today()
+    for stray in stray_recording_dirs():
+        log.warning("videos/%s belongs to no registered camera - retention "
+                    "will never touch it, but the disk still charges for it",
+                    stray.name)
     while True:
-        free_gb = shutil.disk_usage(VIDEO_DIR).free / 2**30
+        free_gb = shutil.disk_usage(VIDEO_ROOT).free / 2**30
         if free_gb >= MIN_FREE_GB:
             return
+        # Oldest day across ALL cameras loses, so the emergency path cannot
+        # favour whichever camera happens to be listed first.
         candidates = []
-        for path in VIDEO_DIR.glob(f"*.{RECORD_EXT}"):
-            day = day_of(path)
-            if day is not None and day < today:
-                candidates.append((day, path))
+        for cam in CAMERAS.values():
+            for path in cam.video_dir.glob(f"*.{RECORD_EXT}"):
+                day = day_of(path)
+                if day is not None and day < today:
+                    candidates.append((day, path))
         if not candidates:
             log.error("Only %.0f GB free but no old recordings to remove", free_gb)
             return
@@ -1024,8 +1230,11 @@ def execute_move(pan: int, tilt: int, pan_speed: int, tilt_speed: int) -> tuple[
 # Web application
 # ---------------------------------------------------------------------------
 app = Flask(__name__)
-frames = FrameBuffer()
-recorder = Recorder(frames)
+# Rebound by build_cameras() to the primary camera's objects. Declared here
+# so the routes below can close over the names before the registry exists.
+frames: FrameBuffer | None = None
+recorder: "Recorder | None" = None
+archive: "ArchiveIndex | None" = None
 ptz: PTZ | None = None
 shutdown = threading.Event()
 http_server = None
@@ -1337,7 +1546,7 @@ def recordings():
         entries=entries,
         total_gb=round(sum(e["size_gb"] for e in entries), 1),
         free_gb=round(shutil.disk_usage(VIDEO_DIR).free / 2**30, 1),
-        retention_days=RETENTION_DAYS,
+        retention_days=primary().cfg.retention_days,
     )
 
 
@@ -1792,7 +2001,7 @@ def current_state() -> dict:
         "current_file": current.name if exists else None,
         "current_size_gb": round(current.stat().st_size / 2**30, 2) if exists else 0,
         "free_gb": round(shutil.disk_usage(VIDEO_DIR).free / 2**30, 1),
-        "retention_days": RETENTION_DAYS,
+        "retention_days": primary().cfg.retention_days,
         # Last COMMANDED imager - RS-485 has no readback, so this is an
         # assumption the UI must present as such, never as ground truth.
         "imager": imager_state,
@@ -1939,6 +2148,10 @@ def serve() -> None:
 
     server = WSGIServer((LISTEN_HOST, LISTEN_PORT), app,
                         numthreads=SERVER_THREADS, server_name="camera")
+    # Do not wait indefinitely for a worker that is blocked writing to a
+    # client which has stopped reading - an MJPEG viewer on a stalled link
+    # will do exactly that.
+    server.shutdown_timeout = 5
     have_cert = Path(TLS_CERT).exists() and Path(TLS_KEY).exists()
     if have_cert:
         from cheroot.ssl.builtin import BuiltinSSLAdapter
@@ -1961,26 +2174,108 @@ def serve() -> None:
             pass
 
 
-def graceful_stop() -> None:
+def _shutdown_watchdog(seconds: float = 25.0) -> threading.Timer:
+    """Guarantee the process exits rather than being SIGKILLed by systemd.
+
+    cheroot's thread-pool stop takes a timeout, but after it expires it
+    forces SHUT_RD on the worker's socket and then joins it *unbounded* - so
+    a worker that is blocked on anything other than a socket read hangs the
+    stop forever. Measured here: 90s, ended by systemd's SIGKILL, with one
+    browser watching the live preview.
+
+    Exiting on our own terms is strictly better than being killed: the
+    recorders have already been asked to stop by then, and MPEG-TS needs no
+    trailer, so nothing is corrupted either way. The thread dump is the point
+    - it names the stuck frame instead of leaving another silent 90 seconds.
+    """
+    def bite() -> None:
+        log.error("Shutdown still running after %.0fs - dumping threads and "
+                  "exiting", seconds)
+        try:
+            faulthandler.dump_traceback()
+        except Exception:
+            pass
+        os._exit(1)
+
+    timer = threading.Timer(seconds, bite)
+    timer.daemon = True
+    timer.start()
+    return timer
+
+
+def graceful_stop(stop_http: bool = True) -> None:
+    """Stop everything, narrating each phase.
+
+    Narrating matters: a stop that overran its systemd timeout logged
+    "Shutting down" and then nothing at all, so the only way to tell which
+    call had hung was to add these lines and make it happen again. Each phase
+    is cheap to log and turns a silent 90-second SIGKILL into one line.
+    """
     if shutdown.is_set():
         return
     shutdown.set()
     log.info("Shutting down")
-    if http_server is not None:
+    watchdog = _shutdown_watchdog()
+
+    # Before the web server: a preview generator parked waiting for a frame
+    # holds a worker, and cheroot's stop() waits for its workers.
+    for cam in CAMERAS.values():
+        cam.frames.wake()
+
+    # Recorders first. They own the only state that a hard exit could damage,
+    # and the web server holding a socket open for another few seconds costs
+    # nothing. Doing this the other way round meant a stuck HTTP worker could
+    # stop the recordings from ever being closed properly.
+    for cam in CAMERAS.values():
+        log.info("Stopping recorder %s", cam.cid)
+        try:
+            cam.recorder.stop()
+        except Exception:
+            log.warning("Recorder %s stop raised", cam.cid, exc_info=True)
+
+    log.info("Stopping the MQTT bridge")
+    try:
+        mqtt_bridge.stop_bridge()
+    except Exception:
+        log.warning("MQTT bridge stop raised", exc_info=True)
+
+    # Only from a thread that is NOT the one running the server loop.
+    #
+    # cheroot's ConnectionManager.stop() is "self._stop_requested = True;
+    # while self._serving: sleep(0.01)" - it spins until the selector loop in
+    # run() notices. run() executes on the main thread, and a signal handler
+    # also runs on the main thread, so calling this from the handler makes the
+    # main thread wait for a loop it is itself blocking. That deadlocked for
+    # 90s until systemd SIGKILLed the service, on every restart that had a
+    # browser watching. All 32 workers were idle throughout, which is what
+    # ruled out a stuck request.
+    #
+    # Skipping it costs nothing: os._exit() follows immediately and the kernel
+    # closes the listening socket and every connection. An HTTP client sees a
+    # reset, which is what a process exit looks like anyway. The recorders -
+    # the only things owning state worth protecting - were already stopped
+    # above.
+    if http_server is not None and stop_http:
+        log.info("Stopping the web server")
         try:
             http_server.stop()
         except Exception:
-            pass
-    mqtt_bridge.stop_bridge()
-    recorder.stop()
+            log.warning("Web server stop raised", exc_info=True)
+    elif http_server is not None:
+        log.info("Leaving the web server to the exit (called from the "
+                 "serving thread)")
+
     if ptz:
         ptz.close()
+    watchdog.cancel()
     log.info("Stopped cleanly")
 
 
 def handle_signal(sig, _frame) -> None:
+    # Runs on the main thread, which is the thread inside the server loop -
+    # hence stop_http=False. See graceful_stop() for why that matters.
     log.info("Signal %s received", sig)
-    graceful_stop()
+    graceful_stop(stop_http=False)
     os._exit(0)
 
 
@@ -1988,7 +2283,8 @@ def main() -> None:
     global ptz
 
     setup_logging()
-    VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+    VIDEO_ROOT.mkdir(parents=True, exist_ok=True)
+    build_cameras()
     check_cache_writable()
     sweep_clips()
 
@@ -2009,7 +2305,9 @@ def main() -> None:
 
     ptz = PTZ(SERIAL_PORT, SERIAL_BAUD)
 
-    threading.Thread(target=recorder.run, name="recorder", daemon=True).start()
+    for cam in CAMERAS.values():
+        threading.Thread(target=cam.recorder.run,
+                         name=f"recorder-{cam.cid}", daemon=True).start()
     threading.Thread(target=retention_loop, args=(shutdown,),
                      name="retention", daemon=True).start()
     mqtt_bridge.start()

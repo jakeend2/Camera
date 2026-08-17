@@ -9,6 +9,11 @@ sys.path.insert(0, "/opt/camera")
 import camera_service as cs
 
 cs.AUTH_ENABLED = False
+# The module no longer builds its camera registry at import time - main() does.
+# Without this the per-camera index, storage and recorder objects do not exist
+# and every global the routes still use is None.
+cs.build_cameras()
+print("  camera under test:", cs.primary().cid, "->", cs.primary().video_dir)
 c = cs.app.test_client()
 fails = []
 
@@ -29,7 +34,7 @@ cached = time.time() - t0
 check("index builds", len(cs.archive._segments) > 0,
       f"{len(cs.archive._segments)} segments in {first:.1f}s")
 check("cached refresh is fast", cached < 2.0, f"{cached:.2f}s")
-check("index cache persisted", cs.INDEX_FILE.exists())
+check("index cache persisted", cs.primary().index.index_file.exists())
 
 day = cs.date.today()
 segs = cs.archive.segments(day)
