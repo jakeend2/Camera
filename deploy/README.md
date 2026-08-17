@@ -422,6 +422,88 @@ mosquitto_sub -h 127.0.0.1 -u camera -P '<password>' -t 'camera/#' -v
 
 ---
 
+## Z-Wave
+
+A SONOFF Z-Wave dongle (Silicon Labs CP210x, Z-Wave 7.23) driven by
+**zwave-js-ui**. This is the one place in the project that runs someone
+else's application rather than a library, and that is deliberate: Z-Wave
+inclusion involves S2 security bootstrapping - ECDH key exchange, DSK
+verification - and a hand-rolled S2 implementation guarding the HVAC is a
+worse idea than a dependency. The broker ACL anticipated it long before the
+hardware arrived.
+
+It is a protocol gateway, not a dashboard: it speaks to the radio, publishes
+to `hvac/` and stays out of the way. Nothing reaches outside the LAN.
+
+### Two serial adapters, one bus of names
+
+This box has an FTDI carrying Pelco-D to a camera and a CP210x Z-Wave
+controller. `ttyUSB` numbering is first-come-first-served, so
+`deploy/70-serial-adapters.rules` binds each by its own serial number:
+
+```
+/dev/pelco-d      -> the FTDI,  group camera
+/dev/zwave-stick  -> the CP210x, group zwave
+```
+
+Neither service gets blanket `dialout`. The camera service cannot open the
+radio and the gateway cannot open the camera's RS-485 link - verified both
+ways. Pelco-D frames sent into a Z-Wave stick would be a miserable thing to
+debug, and the warning in camera_service.py predicted this exact collision
+before the dongle existed.
+
+### Installation
+
+The prebuilt zwave-js-ui binary does **not** run on Bookworm: it needs
+GLIBC 2.38 and this system has 2.36. Node comes from NodeSource instead,
+signing key `6F71F525282841EEDAF851B42F59B5F99B1BE0B4`, and that origin is
+**added to the unattended-upgrades allow-list**. That was a deliberate
+choice: this box runs a Node service with a LAN-reachable web UI, and an
+unpatched runtime is a worse risk than auto-installing from NodeSource. The
+default allow-list is Debian-only, so without that line Node would never
+have been patched automatically.
+
+```bash
+sudo cp deploy/70-serial-adapters.rules /etc/udev/rules.d/
+sudo cp deploy/zwave-js-ui.service /etc/systemd/system/
+sudo udevadm control --reload-rules && sudo udevadm trigger --subsystem-match=tty
+sudo systemctl daemon-reload && sudo systemctl enable --now zwave-js-ui
+```
+
+The unit runs as its own `zwave` user under the same hardening as
+camera.service, and ufw allows 8091 from the LAN and the VPN only.
+
+### Back this up
+
+`/var/lib/zwave-js-ui/store/settings.json` holds six network security keys.
+They encrypt the Z-Wave network, and **losing them means re-pairing every
+device by hand**. The store directory is the thing worth copying somewhere
+safe; nothing else here is irreplaceable.
+
+### MQTT
+
+Publishes under `hvac/` as the broker's `zwave` user, which the ACL confines
+to that prefix:
+
+```
+hvac/driver/status                     true | false
+hvac/nodeID_<n>/status                 per-node alive/dead
+hvac/nodeID_<n>/<class>/<endpoint>/…   values
+hvac/_CLIENTS/ZWAVE_GATEWAY-…/…        gateway's own status
+```
+
+Home Assistant discovery is off - there is no Home Assistant here, and its
+discovery topics live outside `hvac/`, which the ACL refuses anyway.
+
+### Pairing
+
+Done from the web UI on port 8091, because inclusion needs the device in
+your hands: put the controller into inclusion mode, trigger inclusion on the
+device, and enter the DSK when prompted for an S2 device. Nothing about that
+can be scripted from here.
+
+---
+
 ## The garage door
 
 A ratgdo running **homekit-ratgdo** firmware. That firmware speaks HomeKit,

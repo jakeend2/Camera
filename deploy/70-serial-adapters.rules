@@ -1,0 +1,16 @@
+# Bind each USB serial adapter to the service that owns it, matched on the
+# adapter's own serial number rather than on ttyUSB enumeration order.
+#
+# This box has two, and they are first-come-first-served at boot: the FTDI
+# carries Pelco-D to a camera, and the CP210x is a Z-Wave controller. Sending
+# Pelco-D frames into a Z-Wave radio, or the reverse, is a bad failure to
+# debug - so neither service gets blanket `dialout`.
+
+# Bosch MIC 612 PTZ, RS-485 via FTDI FT232R
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6001", \
+  ATTRS{serial}=="AM00KHR1", GROUP="camera", MODE="0660", SYMLINK+="pelco-d"
+
+# SONOFF Z-Wave dongle, Silicon Labs CP210x
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", \
+  ATTRS{serial}=="e8e0dfb1bf75f0119f9aa72f1045c30f", GROUP="zwave", MODE="0660", \
+  SYMLINK+="zwave-stick"

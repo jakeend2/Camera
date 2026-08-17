@@ -14,7 +14,12 @@ Type=simple
 # app was therefore a straight path to root.
 User=camera
 Group=camera
-SupplementaryGroups=video dialout plugdev
+# No `dialout`: /etc/udev/rules.d/70-serial-adapters.rules hands this
+# Pi's FTDI adapter to group `camera` by its serial number. Blanket
+# dialout would also grant this service the Z-Wave radio, which it has
+# no business opening - and the reverse matters more, since Pelco-D
+# frames sent into a Z-Wave stick would be a miserable thing to debug.
+SupplementaryGroups=video plugdev
 WorkingDirectory=/opt/camera
 # MQTT and web credentials live here, outside the repo. The leading '-' means
 # a missing file is not an error - the service starts with those features off.

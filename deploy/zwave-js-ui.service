@@ -1,0 +1,40 @@
+[Unit]
+Description=Z-Wave JS UI - Z-Wave controller and MQTT gateway
+Documentation=https://zwave-js.github.io/zwave-js-ui/
+After=network-online.target mosquitto.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=zwave
+Group=zwave
+# The Z-Wave stick is handed to group `zwave` by
+# /etc/udev/rules.d/70-serial-adapters.rules, matched on its serial number.
+# No blanket `dialout`: this service must never be able to open the camera's
+# RS-485 adapter, and the camera must never be able to open this radio.
+
+Environment=NODE_ENV=production
+Environment=STORE_DIR=/var/lib/zwave-js-ui/store
+Environment=PORT=8091
+Environment=HOST=0.0.0.0
+
+ExecStart=/usr/bin/zwave-js-ui
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+
+# Hardening, matching camera.service.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/zwave-js-ui
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+PrivateTmp=yes
+RemoveIPC=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target
