@@ -1,0 +1,16 @@
+# Select BFQ on the recording disk.
+#
+# camera_service.py runs archive work with `ionice -c 3` (idle class) so that
+# cutting playback windows and clips can never starve the live recording. That
+# only means anything under a scheduler that implements I/O priority classes,
+# and BFQ is the only one in a modern kernel that does: mq-deadline (the
+# default here for a USB/UAS disk) and kyber ignore priorities entirely, so
+# the ionice call was a no-op and the guarantee in deploy/README.md was
+# untrue. Verified on this Pi: /sys/block/sda/queue/scheduler read
+# "none [mq-deadline] kyber bfq".
+#
+# Throughput cost is irrelevant for this workload - two recordings need about
+# 1 MB/s of a device that does 200-300 - and latency fairness is exactly what
+# is wanted when a browser scrubs the archive while both cameras record.
+ACTION=="add|change", SUBSYSTEM=="block", KERNEL=="sd[a-z]", \
+  ATTR{queue/scheduler}=="*bfq*", ATTR{queue/scheduler}="bfq"

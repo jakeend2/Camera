@@ -16,6 +16,7 @@ browsers and owns the RS-485 link for Pelco-D PTZ commands.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import logging.handlers
@@ -136,7 +137,8 @@ CLIP_MAX_SECONDS = _env_int("CLIP_MAX_SECONDS", 1800)
 # and at idle I/O priority, and a request that cannot get a slot within
 # MEDIA_WAIT seconds is refused rather than queued behind a viewer.
 MEDIA_JOBS = _env_int("MEDIA_JOBS", 3)
-MEDIA_WAIT = 8
+MEDIA_WAIT = 3           # a request that cannot get a slot in 3s will not
+                         # get one in 8, and waiting holds a worker thread
 def _cache_dir() -> Path:
     """Somewhere to put clip scratch and cached playback windows.
 
@@ -178,7 +180,11 @@ NICE = ["nice", "-n", "10", "ionice", "-c", "3"]
 
 LISTEN_HOST = "0.0.0.0"
 LISTEN_PORT = 5000
-SERVER_THREADS = 16          # concurrent requests; MJPEG viewers hold one each
+SERVER_THREADS = _env_int("SERVER_THREADS", 32)
+# Each MJPEG viewer holds a worker for as long as it watches, so a browser
+# tab costs one per visible feed. Cheroot workers are ~32-64 KB of RSS, so
+# headroom here is far cheaper than a pool exhaustion that takes out
+# /health - the one page that could explain the outage.
 
 # TLS. Self-signed and local-only by design - the certificate carries the Pi's
 # hostnames and LAN address as SANs. Missing files degrade to plain HTTP with a
@@ -220,6 +226,10 @@ FONT = next((p for p in _FONT_CANDIDATES if Path(p).exists()), None)
 DAY_FILE_RE = re.compile(
     r"^(\d{4}-\d{2}-\d{2})(?:\.part\d+)?\." + RECORD_EXT + r"$"
 )
+
+# Seconds of no new frame before a preview response gives up and frees its
+# worker thread. The page reconnects on its own; a pinned worker does not.
+STREAM_IDLE_GIVEUP = _env_int("STREAM_IDLE_GIVEUP", 15)   # x2s = 30s
 
 SOI = b"\xff\xd8"
 EOI = b"\xff\xd9"
@@ -283,6 +293,23 @@ class FrameBuffer:
     def seq(self) -> int:
         with self._cond:
             return self._seq
+
+
+def _widen_pipe(fileobj, target: int = 1 << 20) -> None:
+    """Grow ffmpeg's stdout pipe so a slow reader cannot stall the capture.
+
+    A pipe defaults to 64 KB. An MJPEG frame at 640 wide and q:v 7 is roughly
+    25-35 KB, so the default holds about two frames - a tenth of a second at
+    20 fps. ffmpeg 5.1 muxes on its main thread, so once that pipe fills, the
+    write to pipe:1 blocks the whole process including the v4l2 read, the
+    dongle's ring buffer overwrites, and frames are lost from the RECORDING
+    with nothing logged. 1 MB is the unprivileged ceiling
+    (/proc/sys/fs/pipe-max-size) and buys roughly 35 frames of slack.
+    """
+    try:
+        fcntl.fcntl(fileobj.fileno(), 1031, target)      # 1031 = F_SETPIPE_SZ
+    except (OSError, AttributeError, ValueError) as exc:
+        log.debug("Could not widen the preview pipe: %s", exc)
 
 
 def pump_preview(stdout, buf: FrameBuffer, stop: threading.Event) -> None:
@@ -618,7 +645,14 @@ class Recorder:
                 today.rename(alt)
                 log.info("Kept earlier recording for today as %s", alt.name)
                 return
-        log.error("Too many same-day parts; leaving %s alone", today.name)
+        # Past 99 restarts in one day, fall back to a name that cannot collide.
+        # Leaving the file in place instead would hand it to ffmpeg's segment
+        # muxer, which opens it O_TRUNC and destroys the whole accumulated day.
+        # DAY_FILE_RE matches part\d+, so a unix stamp stays parseable and the
+        # archive index still attributes it to the right day.
+        alt = VIDEO_DIR / f"{stamp}.part{int(time.time())}.{RECORD_EXT}"
+        today.rename(alt)
+        log.error("Over 99 same-day restarts; kept %s as %s", today.name, alt.name)
 
     def _drain_stderr(self, proc: subprocess.Popen) -> None:
         suppressed = 0
@@ -648,6 +682,7 @@ class Recorder:
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                     bufsize=0, cwd=str(BASE_DIR),
                 )
+                _widen_pipe(proc.stdout)
             except Exception:
                 log.exception("Could not launch ffmpeg")
                 self._stop.wait(backoff)
@@ -769,6 +804,10 @@ def retention_loop(stop: threading.Event) -> None:
     while not stop.is_set():
         try:
             purge_old_recordings()
+            # Before measuring free space, reclaim scratch older than an hour.
+            # It lives on the filesystem enforce_free_space() measures, so
+            # otherwise abandoned clips are paid for out of the archive.
+            sweep_clips(max_age_seconds=3600)
             enforce_free_space()
         except Exception:
             log.exception("Retention pass failed")
@@ -1163,10 +1202,22 @@ def index():
 def camera():
     def stream():
         last = frames.seq - 1
+        idle = 0
         while not shutdown.is_set():
-            got = frames.wait_for(last, timeout=5.0)
+            got = frames.wait_for(last, timeout=2.0)
             if got is None:
-                continue              # no new frame yet; keep the socket open
+                idle += 1
+                # A generator that never yields can never notice the client has
+                # gone, so a camera producing no frames pinned one cheroot
+                # worker per viewer until shutdown - and with the pool
+                # exhausted, /health went down too, hiding the cause. Ending
+                # the response is the only way to release the worker.
+                if idle >= STREAM_IDLE_GIVEUP:
+                    log.info("Preview idle %.0fs - closing the stream",
+                             idle * 2.0)
+                    return
+                continue
+            idle = 0
             last, jpeg = got
             yield (b"--frame\r\nContent-Type: image/jpeg\r\n"
                    b"Content-Length: " + str(len(jpeg)).encode() + b"\r\n\r\n"
@@ -1401,13 +1452,38 @@ def watch(day: str = ""):
 WINDOW_DIR = CLIP_DIR / "windows"
 
 
+# Last time each cached window was actually served, by filename. The
+# filesystem cannot answer this: the root filesystem is mounted noatime, so
+# st_atime is never updated by a read and sorting on it evicts in creation
+# order - FIFO wearing an LRU label. Reads are recorded here instead.
+_window_hits: dict[str, float] = {}
+_window_hits_lock = threading.Lock()
+
+
+def _note_window_use(key: str) -> None:
+    with _window_hits_lock:
+        _window_hits[key] = time.time()
+
+
 def _sweep_windows() -> None:
     """Hold the window cache under budget, dropping least-recently-used."""
     try:
-        files = [(f.stat().st_atime, f.stat().st_size, f)
-                 for f in WINDOW_DIR.glob("*.mp4")]
+        entries = list(WINDOW_DIR.glob("*.mp4"))
     except OSError:
         return
+    files = []
+    with _window_hits_lock:
+        for f in entries:
+            try:
+                st = f.stat()
+            except OSError:
+                continue
+            # Anything not served since this process started falls back to
+            # its build time, which is the best evidence available.
+            files.append((_window_hits.get(f.name, st.st_mtime), st.st_size, f))
+        live = {f.name for f in entries}
+        for gone in [k for k in _window_hits if k not in live]:
+            del _window_hits[gone]
     total = sum(size for _, size, _ in files)
     budget = WINDOW_CACHE_MB * 2**20
     for _, size, path in sorted(files):
@@ -1432,7 +1508,7 @@ def _build_window(seg: dict, into: float, length: float, key: str):
 
     # Built under a unique name and renamed into place, so two viewers asking
     # for the same window cannot serve each other a half-written file.
-    scratch = WINDOW_DIR / f".{key}.{os.getpid()}.{threading.get_ident()}"
+    scratch = WINDOW_DIR / f".{key}.{os.getpid()}.{threading.get_ident()}.part"
     ok, err = _run_media([
         "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
         "-ss", f"{into:.3f}", "-t", f"{length:.3f}",
@@ -1499,6 +1575,7 @@ def play():
             return make_response(
                 jsonify({"ok": False, "error": err or "cut failed"}), 500)
 
+    _note_window_use(key)
     resp = send_from_directory(WINDOW_DIR, key, mimetype="video/mp4",
                                conditional=True)
     resp.headers["X-Segment"] = seg["name"]
@@ -1592,6 +1669,12 @@ def clip():
         log.error("Clip failed: %s", exc)
         return make_response(jsonify({"ok": False, "error": str(exc)}), 500)
 
+    # The ffmpeg work is done. The slot exists to bound concurrent ffmpeg, not
+    # concurrent downloads: holding it until the last byte reaches a phone on
+    # a slow link starved every other request, and a client that vanished
+    # mid-download never released it at all.
+    _media_slots.release()
+
     def deliver():
         try:
             if payload is not None:
@@ -1605,7 +1688,6 @@ def clip():
                     yield chunk
         finally:
             shutil.rmtree(work, ignore_errors=True)
-            _media_slots.release()
 
     stamp = (datetime.fromtimestamp(ArchiveIndex.midnight(day) + start)
              .strftime("%Y%m%d-%H%M%S"))
@@ -1639,16 +1721,39 @@ def check_cache_writable() -> bool:
         return False
 
 
-def sweep_clips() -> None:
-    """Clear scratch left behind by a crash, and re-budget the window cache."""
+def sweep_clips(max_age_seconds: float = 0.0) -> None:
+    """Clear abandoned scratch and re-budget the window cache.
+
+    Called at startup with no age limit (nothing can be in flight yet) and
+    again from the retention loop with one, because a clip whose client
+    vanished leaves its directory behind and CLIP_DIR shares a filesystem
+    with the recordings - so orphaned scratch is paid for by deleting
+    footage.
+    """
+    cutoff = time.time() - max_age_seconds if max_age_seconds else None
     try:
         for stale in CLIP_DIR.glob("clip-*"):
+            if cutoff is not None:
+                try:
+                    if stale.stat().st_mtime > cutoff:
+                        continue        # possibly still being written
+                except OSError:
+                    continue
             shutil.rmtree(stale, ignore_errors=True)
-        for partial in WINDOW_DIR.glob(".*"):
+            log.info("Swept abandoned clip scratch %s", stale.name)
+        # Recursive: windows move into per-camera subdirectories next, and a
+        # non-recursive glob would silently stop matching then.
+        for partial in WINDOW_DIR.glob("**/.*"):
+            if cutoff is not None:
+                try:
+                    if partial.stat().st_mtime > cutoff:
+                        continue
+                except OSError:
+                    continue
             partial.unlink(missing_ok=True)
         _sweep_windows()
     except Exception:
-        pass
+        log.debug("Scratch sweep failed", exc_info=True)
 
 
 @app.route("/Start_New_File", methods=["POST"])

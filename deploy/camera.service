@@ -1,5 +1,5 @@
 [Unit]
-Description=MIC 612 camera recorder and PTZ web control
+Description=Camera recorder and web control
 Documentation=https://github.com/jakeend2/Camera
 After=network-online.target
 Wants=network-online.target
@@ -29,7 +29,11 @@ RestartSec=5
 # SIGTERM lets the service finalise the current recording before exiting.
 KillSignal=SIGTERM
 KillMode=mixed
-TimeoutStopSec=45
+# Each recorder's shutdown asks ffmpeg to finish and waits up to 20s before
+# escalating, so two of them can exceed 45s - at which point KillMode=mixed
+# SIGKILLs the second one mid-write. MPEG-TS survives that, but there is no
+# reason to court it.
+TimeoutStopSec=90
 
 StandardOutput=journal
 StandardError=journal
