@@ -435,6 +435,70 @@ hardware arrived.
 It is a protocol gateway, not a dashboard: it speaks to the radio, publishes
 to `hvac/` and stays out of the way. Nothing reaches outside the LAN.
 
+### The RF region, which costs an evening if you get it wrong
+
+**A Z-Wave controller and a device on different RF regions cannot hear each
+other, and nothing tells you that is the problem.** Inclusion simply fails,
+over and over, exactly as though the device were out of range or faulty.
+
+The SONOFF dongle does not ship set for this region. Pairing a US thermostat
+only worked after setting the controller to **USA (Long Range)**:
+
+```
+setRFRegion(9)      # 9 = USA Long Range;  1 = USA;  0 = Europe
+```
+
+Measured rather than assumed: the region lives in the controller's own NVM.
+After a full USB re-enumeration - unbind, device gone, rebind - it still
+reported `RFRegion: 9`, the home id was intact and the thermostat still
+answered a ping. So a reboot or a replug will not lose it. The udev rule
+reapplies the symlink and ownership on re-enumeration too.
+
+Note `getRFRegion` is **not** an MQTT API - asking for it returns
+`{"success": false, "message": "Unknown API"}`. The current value shows up in
+the controller dump the gateway logs when something calls `getNodes`.
+
+### An API that succeeds while doing nothing
+
+Re-interviewing a node that joined but never got interrogated:
+
+```
+refreshInfo  args [2]                          works
+refreshInfo  args [2, {"waitForWakeup": true}] returns success=true, does nothing
+```
+
+The second form logs `Success zwave api call refreshInfo`, emits no interview
+events, and leaves the node at `interviewStage: 'None'` forever. If a node is
+stuck at `ready=false` with no manufacturer and no values, call `refreshInfo`
+with the node id alone and watch for interview stages in the log.
+
+A node in that state still answers `pingNode` and is not a failed node, which
+is what makes it confusing: the radio link is fine, only the interrogation
+never happened.
+
+### What is paired
+
+```
+node 1   Silicon Labs 700/800 Series (the controller itself)
+node 2   Honeywell TH6320ZW - T6 Pro Z-Wave thermostat, firmware 1.3
+node 255 broadcast pseudo-node, not a real device
+```
+
+The thermostat exposes 69 values. The ones worth surfacing:
+
+| Value | Access |
+|---|---|
+| Air temperature, humidity | read |
+| Setpoint heating / cooling | read/write |
+| Setpoint energy-save heating / cooling | read/write |
+| Thermostat mode, fan mode | read/write |
+| Operating state, fan state | read |
+| Battery level | read |
+
+Topics are ValueID-shaped, `hvac/nodeID_<n>/<commandClass>/<endpoint>/<property>`,
+so the thermostat's setpoints are under command class 67 and its sensors under
+49. Command class 112 is Configuration and accounts for most of the noise.
+
 ### Two serial adapters, one bus of names
 
 This box has an FTDI carrying Pelco-D to a camera and a CP210x Z-Wave
