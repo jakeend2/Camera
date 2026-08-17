@@ -91,14 +91,13 @@
     </div>
 
     <nav class="tabs" id="tabs">
-      <button data-tab="presets" class="active" data-needs="ptz">PRESETS</button>
-      <button data-tab="camera" data-needs="ptz">CAM</button>
-      <button data-tab="sys">SYS</button>
+      <button data-tab="sys" class="active">SYS</button>
       {% if garage %}<button data-tab="garage">DOOR</button>{% endif %}
+      {% if hvac %}<button data-tab="hvac">CLIMATE</button>{% endif %}
     </nav>
 
-    <section class="rail-sec tabpane active" data-pane="presets" data-needs="ptz">
-      <h2 class="sec-title">PRESETS</h2>
+    <details class="fold" data-needs="ptz">
+      <summary class="fold-head">PRESETS</summary>
       <div class="chip-row">
         <button class="chip" data-goto="1">1</button>
         <button class="chip" data-goto="2">2</button>
@@ -118,10 +117,10 @@
       </div>
       <p class="hint">Presets 1&ndash;79. 33, 34, 62 and 80&ndash;99 are camera
       functions and are refused.</p>
-    </section>
+    </details>
 
-    <section class="rail-sec tabpane" data-pane="camera" data-needs="ptz">
-      <h2 class="sec-title">CAMERA</h2>
+    <details class="fold" data-needs="ptz">
+      <summary class="fold-head">CAMERA SETTINGS</summary>
       <div class="chip-row">
         <button class="hold-btn pill" data-hold="iris_open">IRIS+</button>
         <button class="hold-btn pill" data-hold="iris_close">IRIS&minus;</button>
@@ -132,7 +131,50 @@
       </div>
       <p class="hint">In the OSD menu the pad moves the cursor, SELECT
       confirms, and zooming highlights Exit.</p>
+    </details>
+
+    {% if hvac %}
+    <section class="rail-sec tabpane" data-pane="hvac" id="hvac-pane">
+      <h2 class="sec-title">CLIMATE</h2>
+      <dl class="sys-stats">
+        <div><dt>Indoor</dt><dd id="h-temp">&ndash;</dd></div>
+        <div><dt>Humidity</dt><dd id="h-hum">&ndash;</dd></div>
+        <div><dt>Mode</dt><dd id="h-mode">&ndash;</dd></div>
+        <div><dt>Running</dt><dd id="h-op">&ndash;</dd></div>
+        <div><dt>Fan</dt><dd id="h-fan">&ndash;</dd></div>
+        <div><dt>Battery</dt><dd id="h-batt">&ndash;</dd></div>
+      </dl>
+
+      <div class="setpoint-row">
+        <span class="sp-label">HEAT</span>
+        <button class="chip" data-sp="heat" data-delta="-1">&minus;</button>
+        <span class="sp-value" id="h-sp-heat">&ndash;</span>
+        <button class="chip" data-sp="heat" data-delta="1">+</button>
+      </div>
+      <div class="setpoint-row">
+        <span class="sp-label">COOL</span>
+        <button class="chip" data-sp="cool" data-delta="-1">&minus;</button>
+        <span class="sp-value" id="h-sp-cool">&ndash;</span>
+        <button class="chip" data-sp="cool" data-delta="1">+</button>
+      </div>
+      <p class="hint" id="h-pending">&nbsp;</p>
+
+      <div class="chip-row">
+        <button class="pill" data-hvac="mode" data-value="0">OFF</button>
+        <button class="pill" data-hvac="mode" data-value="1">HEAT</button>
+        <button class="pill" data-hvac="mode" data-value="2">COOL</button>
+        <button class="pill" data-hvac="mode" data-value="3">AUTO</button>
+      </div>
+      <div class="chip-row">
+        <button class="pill" data-hvac="fan" data-value="0">FAN AUTO</button>
+        <button class="pill" data-hvac="fan" data-value="1">FAN ON</button>
+      </div>
+      <p class="hint">Setpoints apply a few seconds after you stop adjusting,
+      so holding &minus; sends one command rather than ten. Mode changes ask
+      first. The thermostat reports Celsius and takes Fahrenheit; everything
+      here is Fahrenheit.</p>
     </section>
+    {% endif %}
 
     {% if garage %}
     <section class="rail-sec tabpane" data-pane="garage" id="garage-pane">
@@ -162,7 +204,7 @@
     </section>
     {% endif %}
 
-    <section class="rail-sec tabpane" data-pane="sys">
+    <section class="rail-sec tabpane active" data-pane="sys">
       <h2 class="sec-title">SYSTEM</h2>
       <dl class="sys-stats">
         <div><dt>Recording</dt><dd id="sys-file">&ndash;</dd></div>

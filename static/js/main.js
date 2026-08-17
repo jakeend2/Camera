@@ -531,6 +531,133 @@
     setInterval(refreshGarage, 5000);
   }
 
+  /* ------------------------------------------------------------ climate --
+   * The thermostat is a Z-Wave device behind a gateway, so every command is
+   * a radio round-trip. Setpoint taps are therefore accumulated locally and
+   * sent once the user stops adjusting: holding "+" five times should be one
+   * command at the end, not five queued at the radio.
+   */
+  var hvacPane = $("hvac-pane");
+  var hvacState = null;
+  var pendingSp = { heat: null, cool: null };
+  var spTimer = null;
+
+  function paintHvac(h) {
+    if (!hvacPane || !h) return;
+    hvacState = h;
+    function put(id, text, bad) {
+      var el = $(id);
+      if (!el) return;
+      el.textContent = text;
+      el.classList.toggle("bad", !!bad);
+    }
+    var off = !h.online;
+    put("h-temp", h.temperature_f == null ? "–" : h.temperature_f + " °F", off);
+    put("h-hum", h.humidity == null ? "–" : h.humidity + " %");
+    put("h-mode", h.mode_label || "–");
+    put("h-op", h.operating_label || "–",
+        h.operating_label === "Heating" || h.operating_label === "Cooling");
+    put("h-fan", (h.fan_label || "–") + " / " + (h.fan_state_label || "–"));
+    put("h-batt", h.battery == null ? "–" : h.battery + " %", h.battery < 20);
+
+    // A pending edit wins over the reported value, or the display would snap
+    // back to the old number between taps.
+    var heat = pendingSp.heat != null ? pendingSp.heat : h.setpoint_heat;
+    var cool = pendingSp.cool != null ? pendingSp.cool : h.setpoint_cool;
+    put("h-sp-heat", heat == null ? "–" : heat + "°");
+    put("h-sp-cool", cool == null ? "–" : cool + "°");
+    $("h-sp-heat").classList.toggle("pending", pendingSp.heat != null);
+    $("h-sp-cool").classList.toggle("pending", pendingSp.cool != null);
+
+    document.querySelectorAll("[data-hvac=\"mode\"]").forEach(function (b) {
+      b.classList.toggle("active", String(h.mode) === b.dataset.value);
+    });
+    document.querySelectorAll("[data-hvac=\"fan\"]").forEach(function (b) {
+      b.classList.toggle("active", String(h.fan_mode) === b.dataset.value);
+    });
+  }
+
+  function refreshHvac() {
+    if (!hvacPane) return;
+    fetch("/hvac", { credentials: "include" })
+      .then(function (r) { return r.json(); })
+      .then(paintHvac)
+      .catch(function () { paintHvac({ online: false }); });
+  }
+
+  function sendPending() {
+    var jobs = [];
+    ["heat", "cool"].forEach(function (which) {
+      if (pendingSp[which] == null) return;
+      var value = pendingSp[which];
+      jobs.push(fetch("/hvac/" + which, {
+        method: "POST",
+        credentials: "include",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ value: value })
+      }).then(function (r) { return r.json(); })
+        .then(function (j) {
+          flash(j.ok ? (which + " " + value + "°") : (j.error || "refused"), !j.ok);
+        }));
+    });
+    pendingSp.heat = pendingSp.cool = null;
+    if ($("h-pending")) $("h-pending").innerHTML = "&nbsp;";
+    Promise.all(jobs).then(function () { setTimeout(refreshHvac, 2500); });
+  }
+
+  function nudgeSetpoint(which, delta) {
+    if (!hvacState) return;
+    var base = pendingSp[which] != null ? pendingSp[which]
+             : hvacState["setpoint_" + which];
+    if (base == null) { flash("no setpoint reported yet", true); return; }
+    var next = Math.round(base) + delta;
+    var lo = hvacState.min_f || 45, hi = hvacState.max_f || 90;
+    if (next < lo || next > hi) {
+      flash("setpoint limit is " + lo + "-" + hi + "°", true);
+      return;
+    }
+    pendingSp[which] = next;
+    paintHvac(hvacState);
+    if ($("h-pending")) {
+      $("h-pending").textContent = "sending " + which + " " + next + "° shortly…";
+    }
+    clearTimeout(spTimer);
+    spTimer = setTimeout(sendPending, 2000);
+  }
+
+  document.querySelectorAll("[data-sp]").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      nudgeSetpoint(btn.dataset.sp, parseInt(btn.dataset.delta, 10));
+    });
+  });
+
+  document.querySelectorAll("[data-hvac]").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var what = btn.dataset.hvac, value = btn.dataset.value;
+      // Changing mode can start or stop the whole system; the fan cannot.
+      if (what === "mode") {
+        var label = btn.textContent.trim();
+        if (!confirm("Set the thermostat to " + label + "?")) return;
+      }
+      fetch("/hvac/" + what, {
+        method: "POST",
+        credentials: "include",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ value: value })
+      }).then(function (r) { return r.json(); })
+        .then(function (j) {
+          flash(j.ok ? (what + " set") : (j.error || "refused"), !j.ok);
+          setTimeout(refreshHvac, 2500);
+        })
+        .catch(function () { flash("thermostat unreachable", true); });
+    });
+  });
+
+  if (hvacPane) {
+    refreshHvac();
+    setInterval(refreshHvac, 10000);
+  }
+
   // ---------------------------------------------------------- fullscreen --
   var frame = $("video-frame");
   if ($("fs-btn") && frame) {

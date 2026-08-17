@@ -343,6 +343,17 @@ RATGDO_MQTT_USER = os.environ.get("RATGDO_MQTT_USER", "ratgdo")
 RATGDO_MQTT_PASS = os.environ.get("RATGDO_MQTT_PASS", "")
 GARAGE_PREFIX = os.environ.get("GARAGE_PREFIX", "garage")
 
+# Thermostat, via the Z-Wave gateway. Optional: with no node configured the
+# panel simply does not appear.
+HVAC_PREFIX = os.environ.get("HVAC_PREFIX", "hvac")
+HVAC_NODE = os.environ.get("HVAC_NODE", "nodeID_2")
+HVAC_GATEWAY = os.environ.get(
+    "HVAC_GATEWAY", "_CLIENTS/ZWAVE_GATEWAY-zwave-js-ui")
+HVAC_ENABLED = bool(HVAC_NODE)
+# A typo must not be able to command something absurd in January.
+HVAC_MIN_F = _env_int("HVAC_MIN_F", 45)
+HVAC_MAX_F = _env_int("HVAC_MAX_F", 90)
+
 _FONT_CANDIDATES = (
     "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
@@ -1718,6 +1729,7 @@ def index():
                   "ptz": c.cfg.has_ptz} for c in CAMERAS.values()],
         cam=primary().cid,
         garage=RATGDO_ENABLED,
+        hvac=HVAC_ENABLED,
         diagonals=DIAGONALS_ENABLED,
         default_speed=PTZ_SPEED,
         auth_enabled=AUTH_ENABLED,
@@ -2425,6 +2437,10 @@ def camera_state(cam) -> dict:
         "current_file": current.name if exists else None,
         "current_size_gb": round(current.stat().st_size / 2**30, 2) if exists else 0,
         "retention_days": cam.cfg.retention_days,
+        # Whole-disk, not this camera's share - but the page polls per camera
+        # and would otherwise render "undefined GB" for disk free, which it
+        # did until a screenshot caught it.
+        "free_gb": round(shutil.disk_usage(VIDEO_ROOT).free / 2**30, 1),
         "archive_gb": round(sum(
             f.stat().st_size for f in cam.video_dir.glob(f"*.{RECORD_EXT}")
         ) / 2**30, 1),
@@ -2452,7 +2468,42 @@ def current_state() -> dict:
     })
     if RATGDO_ENABLED:
         head["garage"] = ratgdo.state
+    if HVAC_ENABLED:
+        head["hvac"] = hvac.state
     return head
+
+
+@app.route("/hvac")
+def hvac_state():
+    if not HVAC_ENABLED:
+        return make_response(jsonify({"ok": False,
+                                      "error": "no thermostat configured"}), 404)
+    return jsonify({"ok": True, **hvac.state})
+
+
+@app.route("/hvac/<what>", methods=["POST"])
+def hvac_set(what: str):
+    """Change a setpoint, the mode, or the fan.
+
+    Every control states the value it wants. Setpoints are clamped to a sane
+    band server-side as well as in the page, because a typo that commands 200
+    degrees in January is not a UI problem.
+    """
+    if not HVAC_ENABLED:
+        return make_response(jsonify({"ok": False,
+                                      "error": "no thermostat configured"}), 404)
+    payload = request.get_json(silent=True) or {}
+    value = payload.get("value")
+    if what in ("heat", "cool"):
+        ok, err = hvac.set_setpoint(what, value)
+    elif what == "mode":
+        ok, err = hvac.set_mode(value)
+    elif what == "fan":
+        ok, err = hvac.set_fan(value)
+    else:
+        ok, err = False, f"unknown control '{what}'"
+    return make_response(jsonify({"ok": ok, "what": what, "value": value,
+                                  "error": err}), 200 if ok else 400)
 
 
 @app.route("/garage")
@@ -2750,6 +2801,172 @@ class Ratgdo:
             pass
 
 
+class Hvac:
+    """A thermostat, seen through the Z-Wave gateway rather than directly.
+
+    zwave-js-ui owns the radio and publishes each Z-Wave value to its own
+    topic. This service only listens, and when it wants a change it *asks the
+    gateway* through the gateway's own API rather than publishing device
+    state. That split is enforced by the broker ACL, not by good manners: the
+    camera user may read hvac/# and write the gateway's api topic, and can
+    never publish a value pretending to be the thermostat.
+
+    Topics are ValueID-shaped - hvac/<node>/<commandClass>/<endpoint>/<prop>
+    - so the map below is the whole translation layer.
+    """
+
+    # relative topic -> friendly name
+    READS = {
+        "49/0/Air_temperature": "temperature_c",
+        "49/0/Humidity": "humidity",
+        "64/0/mode": "mode",
+        "66/0/state": "operating_state",
+        "67/0/setpoint/1": "setpoint_heat",
+        "67/0/setpoint/2": "setpoint_cool",
+        "67/0/setpoint/11": "setpoint_heat_eco",
+        "67/0/setpoint/12": "setpoint_cool_eco",
+        "68/0/mode": "fan_mode",
+        "69/0/state": "fan_state",
+        "128/0/level": "battery",
+    }
+    # Z-Wave Thermostat Mode (CC 0x40) and friends. Only the values this
+    # thermostat actually reports are offered for writing.
+    MODES = {0: "Off", 1: "Heat", 2: "Cool", 3: "Auto",
+             11: "Eco heat", 12: "Eco cool"}
+    WRITABLE_MODES = (0, 1, 2, 3)
+    OPERATING = {0: "Idle", 1: "Heating", 2: "Cooling", 3: "Fan only",
+                 4: "Vent", 5: "Aux heat", 6: "2nd stage heat"}
+    FAN_MODES = {0: "Auto", 1: "On", 2: "Auto high", 3: "High"}
+    WRITABLE_FAN_MODES = (0, 1)
+    FAN_STATES = {0: "Idle", 1: "Running", 2: "Running high"}
+    SETPOINTS = {"heat": 1, "cool": 2}
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._values: dict = {}
+        self._seen_at: dict = {}
+        self._client = None
+
+    # -- ingest -------------------------------------------------------------
+    @property
+    def base(self) -> str:
+        return f"{HVAC_PREFIX}/{HVAC_NODE}"
+
+    def subscribe_on(self, client) -> None:
+        """Attach to the camera service's existing broker connection."""
+        self._client = client
+        client.subscribe(f"{self.base}/#", qos=0)
+        client.subscribe(f"{HVAC_PREFIX}/{HVAC_GATEWAY}/api/writeValue", qos=0)
+
+    def handles(self, topic: str) -> bool:
+        return topic.startswith(f"{HVAC_PREFIX}/")
+
+    def ingest(self, topic: str, payload: bytes) -> None:
+        if not topic.startswith(self.base + "/"):
+            return
+        leaf = topic[len(self.base) + 1:]
+        try:
+            body = json.loads(payload.decode("utf-8", "replace"))
+        except Exception:
+            return
+        value = body.get("value") if isinstance(body, dict) else body
+        name = self.READS.get(leaf)
+        if name is None:
+            if leaf == "status":
+                name, value = "alive", bool(value)
+            else:
+                return                      # configuration noise; ignore
+        with self._lock:
+            self._values[name] = value
+            self._seen_at[name] = time.time()
+
+    # -- present ------------------------------------------------------------
+    @staticmethod
+    def _f(celsius):
+        return None if celsius is None else round(celsius * 9 / 5 + 32, 1)
+
+    @property
+    def state(self) -> dict:
+        with self._lock:
+            v = dict(self._values)
+            newest = max(self._seen_at.values(), default=0)
+        mode = v.get("mode")
+        fan_mode = v.get("fan_mode")
+        # The sensor reports Celsius while the setpoints are Fahrenheit -
+        # the thermostat's own doing. Everything is presented in F so the
+        # page never shows two scales side by side.
+        return {
+            "online": bool(v) and (time.time() - newest) < 900,
+            "alive": v.get("alive", bool(v)),
+            "node": HVAC_NODE,
+            "temperature_f": self._f(v.get("temperature_c")),
+            "temperature_c": v.get("temperature_c"),
+            "humidity": v.get("humidity"),
+            "battery": v.get("battery"),
+            "mode": mode,
+            "mode_label": self.MODES.get(mode, "?" if mode is None else str(mode)),
+            "operating_state": v.get("operating_state"),
+            "operating_label": self.OPERATING.get(v.get("operating_state"), "?"),
+            "fan_mode": fan_mode,
+            "fan_label": self.FAN_MODES.get(fan_mode, "?"),
+            "fan_state": v.get("fan_state"),
+            "fan_state_label": self.FAN_STATES.get(v.get("fan_state"), "?"),
+            "setpoint_heat": v.get("setpoint_heat"),
+            "setpoint_cool": v.get("setpoint_cool"),
+            "min_f": HVAC_MIN_F,
+            "max_f": HVAC_MAX_F,
+        }
+
+    # -- command ------------------------------------------------------------
+    def _write(self, command_class: int, prop: str, value,
+               property_key=None) -> tuple[bool, str]:
+        if self._client is None:
+            return False, "no broker connection"
+        value_id = {"nodeId": int(HVAC_NODE.rsplit("_", 1)[-1]),
+                    "commandClass": command_class, "endpoint": 0,
+                    "property": prop}
+        if property_key is not None:
+            value_id["propertyKey"] = property_key
+        try:
+            self._client.publish(
+                f"{HVAC_PREFIX}/{HVAC_GATEWAY}/api/writeValue/set",
+                json.dumps({"args": [value_id, value]}), qos=1)
+        except Exception as exc:
+            return False, f"could not reach the gateway: {exc}"
+        log.info("HVAC: asked the gateway to set %s=%s", prop, value)
+        return True, ""
+
+    def set_setpoint(self, which: str, value) -> tuple[bool, str]:
+        key = self.SETPOINTS.get((which or "").strip().lower())
+        if key is None:
+            return False, "setpoint must be heat or cool"
+        try:
+            wanted = round(float(value))
+        except (TypeError, ValueError):
+            return False, f"{value!r} is not a temperature"
+        if not HVAC_MIN_F <= wanted <= HVAC_MAX_F:
+            return False, f"setpoint must be {HVAC_MIN_F}-{HVAC_MAX_F} F"
+        return self._write(67, "setpoint", wanted, property_key=key)
+
+    def set_mode(self, mode) -> tuple[bool, str]:
+        try:
+            wanted = int(mode)
+        except (TypeError, ValueError):
+            return False, f"{mode!r} is not a mode"
+        if wanted not in self.WRITABLE_MODES:
+            return False, f"mode must be one of {list(self.WRITABLE_MODES)}"
+        return self._write(64, "mode", wanted)
+
+    def set_fan(self, mode) -> tuple[bool, str]:
+        try:
+            wanted = int(mode)
+        except (TypeError, ValueError):
+            return False, f"{mode!r} is not a fan mode"
+        if wanted not in self.WRITABLE_FAN_MODES:
+            return False, "fan must be 0 (auto) or 1 (on)"
+        return self._write(68, "mode", wanted)
+
+
 class MqttBridge:
     """Publishes camera state and accepts PTZ commands over MQTT.
 
@@ -2809,6 +3026,8 @@ class MqttBridge:
         log.info("MQTT connected")
         client.publish(f"{MQTT_PREFIX}/status", "online", qos=1, retain=True)
         client.subscribe(f"{MQTT_PREFIX}/ptz/set", qos=1)
+        if HVAC_ENABLED:
+            hvac.subscribe_on(client)
         for cid in CAMERAS:
             client.subscribe(f"{MQTT_PREFIX}/{cid}/ptz/set", qos=1)
         self._publish_state()
@@ -2828,6 +3047,11 @@ class MqttBridge:
         return primary(), primary().cid
 
     def _on_message(self, client, userdata, msg):
+        # Thermostat traffic arrives on this same connection; it is state to
+        # absorb, not a command to us.
+        if HVAC_ENABLED and hvac.handles(msg.topic):
+            hvac.ingest(msg.topic, msg.payload)
+            return
         try:
             cam, cid = self._camera_for(msg.topic)
             result_topic = (f"{MQTT_PREFIX}/{cid}/ptz/result"
@@ -2906,6 +3130,7 @@ class MqttBridge:
 
 mqtt_bridge = MqttBridge(shutdown)
 ratgdo = Ratgdo(shutdown)
+hvac = Hvac()
 
 
 # ---------------------------------------------------------------------------

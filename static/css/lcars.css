@@ -813,3 +813,79 @@ a { color: var(--blue); }
 }
 
 .watch .cam-seg { max-width: 420px; }
+
+/* ------------------------------------------------------------------ folds -- */
+/* Native <details>, so infrequent controls cost no JavaScript and nothing
+   for the CSP to allow. They start closed on every load, which is right for
+   things you touch rarely - a remembered open state would just be clutter
+   you did not ask for. */
+.fold {
+  background: var(--panel-2);
+  border-radius: var(--r-md);
+  padding: 0 12px 2px;
+}
+
+.fold[open] { padding-bottom: 12px; }
+
+.fold-head {
+  list-style: none;
+  cursor: pointer;
+  min-height: var(--tap);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--orange);
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+}
+
+.fold-head::-webkit-details-marker { display: none; }
+
+.fold-head::before {
+  content: "\25B8";              /* right-pointing triangle */
+  display: inline-block;
+  transition: transform 0.15s;
+  font-size: 0.9rem;
+}
+
+.fold[open] .fold-head::before { transform: rotate(90deg); }
+
+.fold[open] .fold-head {
+  border-bottom: 1px solid var(--orange-dim);
+  margin-bottom: 10px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fold-head::before { transition: none; }
+}
+
+/* --------------------------------------------------------------- setpoints -- */
+.setpoint-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.sp-label {
+  flex: 0 0 44px;
+  color: var(--blue);
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+}
+
+.sp-value {
+  flex: 1;
+  text-align: center;
+  font-size: 1.5rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--orange);
+}
+
+/* An edit not yet sent to the radio reads differently from a confirmed one. */
+.sp-value.pending { color: var(--blue); }
+
+.setpoint-row .chip { min-width: 56px; font-size: 1.1rem; }
