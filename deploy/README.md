@@ -422,6 +422,72 @@ mosquitto_sub -h 127.0.0.1 -u camera -P '<password>' -t 'camera/#' -v
 
 ---
 
+## The garage door
+
+A ratgdo running **homekit-ratgdo** firmware. That firmware speaks HomeKit,
+which is the one thing this project does not want - everything goes through
+the web page, nothing through a phone app. It also serves a plain HTTP API,
+and that is what the bridge uses, so the device did not need reflashing:
+
+```
+GET  /status.json     full state, unauthenticated
+POST /setgdo          garageDoorState 1=open 0=close, garageLightOn,
+                      garageLockState - multipart form, HTTP digest auth
+```
+
+Reads are open on the device; **commands are not**, and that was verified
+rather than assumed - `POST /setgdo` with no credentials answers 401. Set a
+password on the device before trusting it: without one, anyone on the LAN can
+open the door with a single request.
+
+Two things on that device are worth knowing:
+
+- `POST /reboot` is **not** authenticated. Anyone on the LAN can restart it.
+  That is a nuisance rather than a way in, but it is worth knowing, and it is
+  how this bridge's author discovered it - by rebooting the door controller
+  while probing whether commands were protected.
+- `GET /status.json` is unauthenticated, so door state is readable by anything
+  on the network.
+
+### Identity
+
+The bridge publishes as the broker's **`ratgdo`** user, not as `camera`. The
+ACL deliberately allows the camera service to *read* `garage/#` and write only
+`garage/+/set`; it is not permitted to invent garage state. Standing in for the
+device is exactly what this bridge does, so it uses the device's identity.
+
+```
+garage/status         online | offline (retained, LWT)
+garage/state          full JSON (retained)
+garage/door           Closed | Open | Opening | Closing (retained)
+garage/light          on | off
+garage/lock           on | off
+garage/obstruction    true | false
+garage/door/set       open | close
+garage/light/set      on | off
+garage/lock/set       on | off
+```
+
+### Two rules the controls follow
+
+**Every control states the state it wants; nothing toggles.** A toggle raced
+against a door already moving is how you open one you meant to close.
+
+**Nothing is inferred from an unrecognised value.** An early version mapped
+"anything not on" to off, which is harmless for a light and not harmless for
+the remote lock - an empty MQTT payload would have enabled the remotes. All
+three controls now refuse a value they do not recognise.
+
+State is polled every `RATGDO_POLL` seconds rather than taken from the
+device's SSE stream. The stream exists and is lower latency, but a silently
+dead long-lived connection looks exactly like a quiet garage, and a two-second
+poll of a device on the same switch costs nothing worth measuring. Publishing
+skips the volatile fields - uptime and signal strength change every poll, and
+comparing them would republish retained state thirty times a minute for a door
+that has not moved in a week.
+
+---
+
 ## More than one camera
 
 Each camera is an object that owns its own directory, archive index, probe

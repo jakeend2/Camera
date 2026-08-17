@@ -30,7 +30,9 @@ import subprocess
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.parse
+import urllib.request
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -325,6 +327,21 @@ MQTT_PASSWORD = os.environ.get("MQTT_PASSWORD") or None
 MQTT_PREFIX = os.environ.get("MQTT_PREFIX", "camera")
 MQTT_ENABLED = bool(MQTT_USERNAME and MQTT_PASSWORD)
 MQTT_STATE_INTERVAL = 30     # seconds between retained state publishes
+
+# Garage door controller (homekit-ratgdo). Optional: with no host configured
+# the bridge stays off and nothing else notices.
+RATGDO_HOST = os.environ.get("RATGDO_HOST", "").strip()
+RATGDO_USER = os.environ.get("RATGDO_USER", "admin")
+RATGDO_PASS = os.environ.get("RATGDO_PASS", "")
+RATGDO_ENABLED = bool(RATGDO_HOST)
+RATGDO_POLL = _env_int("RATGDO_POLL", 2)
+# The bridge publishes as the broker's `ratgdo` user, not as `camera`. The ACL
+# deliberately lets the camera service READ garage state and write only to
+# garage/+/set - it is not allowed to invent garage state, and standing in for
+# the device is exactly what this bridge does.
+RATGDO_MQTT_USER = os.environ.get("RATGDO_MQTT_USER", "ratgdo")
+RATGDO_MQTT_PASS = os.environ.get("RATGDO_MQTT_PASS", "")
+GARAGE_PREFIX = os.environ.get("GARAGE_PREFIX", "garage")
 
 _FONT_CANDIDATES = (
     "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
@@ -1700,6 +1717,7 @@ def index():
         cameras=[{"cid": c.cid, "name": c.cfg.name, "aspect": c.cfg.aspect,
                   "ptz": c.cfg.has_ptz} for c in CAMERAS.values()],
         cam=primary().cid,
+        garage=RATGDO_ENABLED,
         diagonals=DIAGONALS_ENABLED,
         default_speed=PTZ_SPEED,
         auth_enabled=AUTH_ENABLED,
@@ -2432,7 +2450,36 @@ def current_state() -> dict:
         # assumption the UI must present as such, never as ground truth.
         "imager": imager_state,
     })
+    if RATGDO_ENABLED:
+        head["garage"] = ratgdo.state
     return head
+
+
+@app.route("/garage")
+def garage_state():
+    """Current garage state, for the web UI."""
+    if not RATGDO_ENABLED:
+        return make_response(jsonify({"ok": False,
+                                      "error": "no garage configured"}), 404)
+    return jsonify({"ok": True, **ratgdo.state})
+
+
+@app.route("/garage/<what>", methods=["POST"])
+def garage_set(what: str):
+    """Open/close the door, or toggle the light or remote lock.
+
+    Deliberately not a toggle: the caller states the state it wants. A toggle
+    raced against a door that is already moving is how you end up opening a
+    door you meant to close.
+    """
+    if not RATGDO_ENABLED:
+        return make_response(jsonify({"ok": False,
+                                      "error": "no garage configured"}), 404)
+    payload = request.get_json(silent=True) or {}
+    value = str(payload.get("value", "")).strip()
+    ok, err = ratgdo.apply(what, value)
+    return make_response(jsonify({"ok": ok, "what": what, "value": value,
+                                  "error": err}), 200 if ok else 400)
 
 
 @app.route("/health")
@@ -2450,6 +2497,259 @@ def health():
 # ---------------------------------------------------------------------------
 # MQTT bridge
 # ---------------------------------------------------------------------------
+class Ratgdo:
+    """Local bridge to a homekit-ratgdo controller.
+
+    The device speaks HomeKit, which is no use here - the whole project is
+    "everything through the web page, nothing through a phone app". It also
+    serves a plain HTTP API, and that is what this uses:
+
+        GET  /status.json   full state
+        POST /setgdo        garageDoorState 1=open 0=close, garageLightOn,
+                            garageLockState - multipart form, digest auth
+
+    Reads are unauthenticated on the device; commands are not, which is the
+    right way round and was verified rather than assumed (POST /setgdo with
+    no credentials answers 401).
+
+    State is polled rather than taken from the device's SSE stream. The stream
+    exists and would be lower latency, but a silently dead long-lived
+    connection looks identical to a quiet garage, and a two-second poll of a
+    device on the same switch costs nothing worth measuring.
+    """
+
+    DOOR_OPEN, DOOR_CLOSE = "1", "0"
+
+    def __init__(self, stop: threading.Event) -> None:
+        self._stop = stop
+        self._lock = threading.Lock()
+        self._state: dict = {}
+        self._fetched_at = 0.0
+        self._published_at = 0.0
+        self._client = None
+        self._opener = self._build_opener()
+
+    # -- HTTP ---------------------------------------------------------------
+    def _build_opener(self):
+        mgr = urllib.request.HTTPPasswordMgrWithDefaultRealm()
+        mgr.add_password(None, f"http://{RATGDO_HOST}/", RATGDO_USER, RATGDO_PASS)
+        return urllib.request.build_opener(
+            urllib.request.HTTPDigestAuthHandler(mgr),
+            urllib.request.HTTPBasicAuthHandler(mgr),
+        )
+
+    def _get_status(self) -> dict | None:
+        try:
+            with urllib.request.urlopen(
+                    f"http://{RATGDO_HOST}/status.json", timeout=6) as r:
+                return json.load(r)
+        except Exception:
+            return None
+
+    def command(self, key: str, value: str) -> tuple[bool, str]:
+        """Send one setting to the device. Returns (ok, error)."""
+        if not RATGDO_ENABLED:
+            return False, "garage bridge is not configured"
+        if key not in ("garageDoorState", "garageLightOn", "garageLockState"):
+            return False, f"refusing to set '{key}'"
+        boundary = "----ratgdo" + os.urandom(8).hex()
+        body = (f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="{key}"\r\n\r\n'
+                f"{value}\r\n--{boundary}--\r\n").encode()
+        req = urllib.request.Request(
+            f"http://{RATGDO_HOST}/setgdo", data=body, method="POST",
+            headers={"Content-Type":
+                     f"multipart/form-data; boundary={boundary}"})
+        try:
+            with self._opener.open(req, timeout=8) as r:
+                ok = r.status == 200
+            if ok:
+                log.info("Garage: set %s=%s", key, value)
+                # Re-read promptly so the UI does not wait for the next tick.
+                self.refresh()
+            return ok, "" if ok else "device refused the command"
+        except urllib.error.HTTPError as exc:
+            if exc.code == 401:
+                return False, "garage rejected our credentials"
+            return False, f"garage returned HTTP {exc.code}"
+        except Exception as exc:
+            return False, f"garage unreachable: {type(exc).__name__}"
+
+    # -- normalised view ----------------------------------------------------
+    @staticmethod
+    def _normalise(raw: dict) -> dict:
+        return {
+            "online": True,
+            "door": raw.get("garageDoorState", "Unknown"),
+            "light": bool(raw.get("garageLightOn")),
+            "locked": raw.get("garageLockState") == "Enabled",
+            "obstructed": bool(raw.get("garageObstructed")),
+            "motion": bool(raw.get("garageMotion")),
+            "openings": raw.get("openingsCount"),
+            "device": raw.get("deviceName"),
+            "firmware": raw.get("firmwareVersion"),
+            "security_type": raw.get("GDOSecurityType"),
+            "uptime_s": round((raw.get("upTime") or 0) / 1000),
+            "wifi_rssi": raw.get("wifiRSSI"),
+        }
+
+    @property
+    def state(self) -> dict:
+        with self._lock:
+            if not self._state:
+                return {"online": False, "door": "Unknown"}
+            stale = time.monotonic() - self._fetched_at > max(15, RATGDO_POLL * 5)
+            return dict(self._state, online=not stale)
+
+    # Fields that move on every single poll. Comparing them would make every
+    # poll look like a change, and the bridge would publish retained state
+    # thirty times a minute for a door that had not moved in a week.
+    VOLATILE = ("uptime_s", "wifi_rssi")
+
+    @classmethod
+    def _meaningful(cls, state: dict) -> dict:
+        return {k: v for k, v in state.items() if k not in cls.VOLATILE}
+
+    def refresh(self) -> bool:
+        raw = self._get_status()
+        if raw is None:
+            return False
+        norm = self._normalise(raw)
+        now = time.monotonic()
+        with self._lock:
+            changed = self._meaningful(norm) != self._meaningful(self._state)
+            due = now - self._published_at >= MQTT_STATE_INTERVAL
+            self._state = norm
+            self._fetched_at = now
+            if changed or due:
+                self._published_at = now
+        if changed or due:
+            self._publish()
+        return True
+
+    # -- MQTT ---------------------------------------------------------------
+    def _publish(self) -> None:
+        if self._client is None:
+            return
+        s = self.state
+        try:
+            self._client.publish(f"{GARAGE_PREFIX}/state", json.dumps(s),
+                                 qos=0, retain=True)
+            for topic, value in (("door", s.get("door")),
+                                 ("light", "on" if s.get("light") else "off"),
+                                 ("lock", "on" if s.get("locked") else "off"),
+                                 ("obstruction",
+                                  "true" if s.get("obstructed") else "false")):
+                self._client.publish(f"{GARAGE_PREFIX}/{topic}", str(value),
+                                     qos=0, retain=True)
+        except Exception:
+            log.debug("Garage MQTT publish failed", exc_info=True)
+
+    def _on_connect(self, client, userdata, flags, reason_code, properties=None):
+        if reason_code != 0:
+            log.error("Garage MQTT connection refused: %s", reason_code)
+            return
+        log.info("Garage MQTT connected as '%s'", RATGDO_MQTT_USER)
+        client.publish(f"{GARAGE_PREFIX}/status", "online", qos=1, retain=True)
+        for leaf in ("door", "light", "lock"):
+            client.subscribe(f"{GARAGE_PREFIX}/{leaf}/set", qos=1)
+        self._publish()
+
+    def _on_message(self, client, userdata, msg):
+        leaf = msg.topic.rsplit("/", 2)[-2] if "/" in msg.topic else ""
+        want = msg.payload.decode("utf-8", "replace").strip().lower()
+        ok, err = self.apply(leaf, want)
+        client.publish(f"{GARAGE_PREFIX}/result",
+                       json.dumps({"what": leaf, "value": want,
+                                   "ok": ok, "error": err}), qos=0)
+
+    # Every control states the state it wants; nothing is ever inferred from
+    # an unrecognised value. Falling through to "off" looks harmless for a
+    # light, but the same path would have taken an empty MQTT payload and
+    # ENABLED the remote controls - a security setting decided by a typo.
+    ON_WORDS = ("on", "1", "true", "yes", "lock", "locked", "enable")
+    OFF_WORDS = ("off", "0", "false", "no", "unlock", "unlocked", "disable")
+
+    @classmethod
+    def _boolean(cls, value: str):
+        if value in cls.ON_WORDS:
+            return True
+        if value in cls.OFF_WORDS:
+            return False
+        return None
+
+    def apply(self, what: str, value: str) -> tuple[bool, str]:
+        """Map a friendly instruction onto the device's own vocabulary."""
+        value = (value or "").strip().lower()
+        if what == "door":
+            if value in ("open", "1", "true"):
+                return self.command("garageDoorState", self.DOOR_OPEN)
+            if value in ("close", "closed", "0", "false"):
+                return self.command("garageDoorState", self.DOOR_CLOSE)
+            return False, "door takes open or close"
+        if what in ("light", "lock"):
+            wanted = self._boolean(value)
+            if wanted is None:
+                return False, f"{what} takes on or off, not {value!r}"
+            key = "garageLightOn" if what == "light" else "garageLockState"
+            return self.command(key, "1" if wanted else "0")
+        return False, f"unknown control '{what}'"
+
+    # -- lifecycle ----------------------------------------------------------
+    def start(self) -> None:
+        if not RATGDO_ENABLED:
+            log.info("Garage bridge off - RATGDO_HOST is not set")
+            return
+        if RATGDO_MQTT_PASS and MQTT_ENABLED:
+            client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2,
+                                 client_id=f"{GARAGE_PREFIX}-bridge")
+            client.username_pw_set(RATGDO_MQTT_USER, RATGDO_MQTT_PASS)
+            client.will_set(f"{GARAGE_PREFIX}/status", "offline",
+                            qos=1, retain=True)
+            client.on_connect = self._on_connect
+            client.on_message = self._on_message
+            client.reconnect_delay_set(min_delay=1, max_delay=60)
+            self._client = client
+            try:
+                client.connect_async(MQTT_HOST, MQTT_PORT, keepalive=30)
+                client.loop_start()
+            except Exception:
+                log.exception("Garage MQTT failed to start")
+                self._client = None
+        else:
+            log.info("Garage MQTT off - no broker credentials for '%s'",
+                     RATGDO_MQTT_USER)
+        threading.Thread(target=self._run, name="garage", daemon=True).start()
+        log.info("Garage bridge polling %s every %ds",
+                 RATGDO_HOST, RATGDO_POLL)
+
+    def _run(self) -> None:
+        misses = 0
+        while not self._stop.is_set():
+            if self.refresh():
+                misses = 0
+            else:
+                misses += 1
+                if misses in (3, 30, 300):
+                    log.warning("Garage unreachable (%d consecutive misses)",
+                                misses)
+                if misses == 3:
+                    self._publish()      # let the UI show it as offline
+            self._stop.wait(RATGDO_POLL)
+
+    def stop_bridge(self) -> None:
+        if self._client is None:
+            return
+        try:
+            self._client.publish(f"{GARAGE_PREFIX}/status", "offline",
+                                 qos=1, retain=True).wait_for_publish(timeout=2)
+            self._client.loop_stop()
+            self._client.disconnect()
+            log.info("Garage bridge stopped")
+        except Exception:
+            pass
+
+
 class MqttBridge:
     """Publishes camera state and accepts PTZ commands over MQTT.
 
@@ -2605,6 +2905,7 @@ class MqttBridge:
 
 
 mqtt_bridge = MqttBridge(shutdown)
+ratgdo = Ratgdo(shutdown)
 
 
 # ---------------------------------------------------------------------------
@@ -2705,6 +3006,12 @@ def graceful_stop(stop_http: bool = True) -> None:
         except Exception:
             log.warning("Recorder %s stop raised", cam.cid, exc_info=True)
 
+    log.info("Stopping the garage bridge")
+    try:
+        ratgdo.stop_bridge()
+    except Exception:
+        log.warning("Garage bridge stop raised", exc_info=True)
+
     log.info("Stopping the MQTT bridge")
     try:
         mqtt_bridge.stop_bridge()
@@ -2783,6 +3090,7 @@ def main() -> None:
     threading.Thread(target=retention_loop, args=(shutdown,),
                      name="retention", daemon=True).start()
     mqtt_bridge.start()
+    ratgdo.start()
 
     serve()
 

@@ -460,6 +460,77 @@
     });
   });
 
+  /* ------------------------------------------------------------ garage --
+   * Separate from the cameras in every way: its own device, its own MQTT
+   * identity, its own poll. The door buttons confirm first and state the
+   * state they want, never toggling.
+   */
+  var garagePane = $("garage-pane");
+
+  function paintGarage(g) {
+    if (!garagePane || !g) return;
+    var door = $("g-door");
+    if (door) {
+      door.textContent = g.online ? (g.door || "?") : "offline";
+      door.classList.toggle("bad", !g.online || g.door === "Open");
+    }
+    var obst = $("g-obst");
+    if (obst) {
+      obst.textContent = g.obstructed ? "BLOCKED" : "clear";
+      obst.classList.toggle("bad", !!g.obstructed);
+    }
+    if ($("g-light")) $("g-light").textContent = g.light ? "on" : "off";
+    if ($("g-lock")) $("g-lock").textContent = g.locked ? "locked" : "unlocked";
+    if ($("g-meta")) {
+      $("g-meta").textContent = g.online
+        ? (g.device || "garage") + " · " + (g.openings || 0) + " openings · " +
+          (g.wifi_rssi || "")
+        : "not responding";
+    }
+  }
+
+  function garageSet(what, value) {
+    return fetch("/garage/" + encodeURIComponent(what), {
+      method: "POST",
+      credentials: "include",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ value: value })
+    }).then(function (r) { return r.json(); })
+      .then(function (j) {
+        flash(j.ok ? (what + " " + value) : (j.error || "refused"), !j.ok);
+        setTimeout(refreshGarage, 700);
+        return j;
+      })
+      .catch(function () { flash("garage unreachable", true); });
+  }
+
+  function refreshGarage() {
+    if (!garagePane) return;
+    fetch("/garage", { credentials: "include" })
+      .then(function (r) { return r.json(); })
+      .then(paintGarage)
+      .catch(function () { paintGarage({ online: false }); });
+  }
+
+  document.querySelectorAll("[data-garage]").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      garageSet(btn.dataset.garage, btn.dataset.value);
+    });
+  });
+
+  if ($("g-open")) $("g-open").addEventListener("click", function () {
+    if (confirm("Open the garage door?")) garageSet("door", "open");
+  });
+  if ($("g-close")) $("g-close").addEventListener("click", function () {
+    if (confirm("Close the garage door?\n\nMake sure nothing is in the way."))
+      garageSet("door", "close");
+  });
+
+  if (garagePane) {
+    refreshGarage();
+    setInterval(refreshGarage, 5000);
+  }
+
   // ---------------------------------------------------------- fullscreen --
   var frame = $("video-frame");
   if ($("fs-btn") && frame) {

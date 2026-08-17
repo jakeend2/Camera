@@ -94,6 +94,7 @@
       <button data-tab="presets" class="active" data-needs="ptz">PRESETS</button>
       <button data-tab="camera" data-needs="ptz">CAM</button>
       <button data-tab="sys">SYS</button>
+      {% if garage %}<button data-tab="garage">DOOR</button>{% endif %}
     </nav>
 
     <section class="rail-sec tabpane active" data-pane="presets" data-needs="ptz">
@@ -132,6 +133,34 @@
       <p class="hint">In the OSD menu the pad moves the cursor, SELECT
       confirms, and zooming highlights Exit.</p>
     </section>
+
+    {% if garage %}
+    <section class="rail-sec tabpane" data-pane="garage" id="garage-pane">
+      <h2 class="sec-title">GARAGE DOOR</h2>
+      <dl class="sys-stats">
+        <div><dt>Door</dt><dd id="g-door">&ndash;</dd></div>
+        <div><dt>Obstruction</dt><dd id="g-obst">&ndash;</dd></div>
+        <div><dt>Light</dt><dd id="g-light">&ndash;</dd></div>
+        <div><dt>Remotes</dt><dd id="g-lock">&ndash;</dd></div>
+      </dl>
+      <div class="chip-row">
+        <button class="pill pill-danger" id="g-open">OPEN</button>
+        <button class="pill pill-danger" id="g-close">CLOSE</button>
+      </div>
+      <div class="chip-row">
+        <button class="pill" data-garage="light" data-value="on">LIGHT ON</button>
+        <button class="pill" data-garage="light" data-value="off">LIGHT OFF</button>
+      </div>
+      <div class="chip-row">
+        <button class="pill" data-garage="lock" data-value="on">LOCK REMOTES</button>
+        <button class="pill" data-garage="lock" data-value="off">UNLOCK</button>
+      </div>
+      <p class="hint" id="g-meta">&ndash;</p>
+      <p class="hint">OPEN and CLOSE ask first. Every control states the state
+      it wants rather than toggling &mdash; a toggle racing a door that is
+      already moving is how you open one you meant to close.</p>
+    </section>
+    {% endif %}
 
     <section class="rail-sec tabpane" data-pane="sys">
       <h2 class="sec-title">SYSTEM</h2>
