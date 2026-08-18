@@ -369,6 +369,24 @@ a { color: var(--blue); }
   gap: 8px;
 }
 
+/* ----------------------------------------------------------- touch holds -- */
+/* Anything held or dragged must not also behave like text. Holding an arrow
+   on the pad started a selection that reached in and grabbed the STOP label
+   in the middle of it: the control rules below carry user-select: none, but
+   the pad is an <svg> and the timeline is a <div>, so neither was covered.
+   The descendant selectors matter - the selection was of the <text> INSIDE
+   the svg, not of the svg itself, and pointer-events: none on that label does
+   nothing here because selection is not a pointer event. */
+#dpad, #dpad *,
+#tl, #tl *,
+#tl-ticks, #tl-ticks *,
+.fold-head {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
 /* -------------------------------------------------------------- controls -- */
 .hold-btn, .pill, .chip, .seg button, .tabs button, .speed-seg button {
   min-height: var(--tap);
