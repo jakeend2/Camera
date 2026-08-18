@@ -562,7 +562,12 @@
              : !h.fresh ? ("stale" + (h.age_s ? " " + Math.round(h.age_s / 60) + " min" : ""))
              : h.alive === true ? "ok" : "no report";
     put("h-link", link, off);
-    put("h-temp", h.temperature_f == null ? "–" : h.temperature_f + " °F", off);
+    // Fahrenheit when the gateway has told us the unit; the raw reading and
+    // its unit when it has not. Never a number under an assumed scale.
+    put("h-temp", h.temperature_f != null ? h.temperature_f + " °F"
+                : h.temperature_raw != null
+                  ? h.temperature_raw + " " + (h.temperature_unit || "?")
+                  : "–", off);
     put("h-hum", h.humidity == null ? "–" : h.humidity + " %");
     put("h-mode", h.mode_label || "–");
     put("h-op", h.operating_label || "–",

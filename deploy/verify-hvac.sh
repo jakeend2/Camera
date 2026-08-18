@@ -54,17 +54,123 @@ for k in ("fresh", "alive", "age_s", "running", "eco"):
 [ $? -eq 0 ] && ok "GET /hvac carries the new liveness fields" \
              || bad "GET /hvac is missing fields"
 
-# The retained values are hours old. Freshness now comes from the timestamp
-# the gateway puts in each payload, not from when we happened to receive it,
-# so a reconnect must not make them look new.
-echo "$STATE" | grep -q '"fresh": *false' \
-  && ok "hours-old retained values report fresh=false" \
-  || bad "stale values are being reported as fresh"
+echo "$STATE" | venv/bin/python -c '
+import json, sys
+s = json.load(sys.stdin)
+age, fresh = s.get("age_s"), s.get("fresh")
+assert age is not None, "no age_s"
+assert fresh == (age < 900), "fresh=%s does not follow from age=%s" % (fresh, age)
+' && ok "freshness follows from the reading age" \
+  || bad "freshness does not follow from the reading age"
+
+# The live checks above can only see whatever the thermostat happens to be
+# doing. These feed the class known payloads, so the cases that caused real
+# bugs - retained replay, a dead node, the wrong temperature scale - are
+# checked every run rather than whenever the house cooperates.
+timeout 60 venv/bin/python - <<'PY'
+import sys, time
+sys.path.insert(0, "/opt/camera")
+import camera_service as cs
+import json as _j
+
+NODE = int(cs.HVAC_NODE.rsplit("_", 1)[-1])
+F, C = "°F", "°C"
+
+
+def fresh_hvac(unit=F):
+    h = cs.Hvac()
+    if unit:
+        h._absorb_units({"result": [{"id": NODE, "values": {
+            "49-0-Air temperature": {"unit": unit},
+            "67-0-setpoint-1": {"unit": unit},
+            "67-0-setpoint-2": {"unit": unit},
+            "67-0-setpoint-11": {"unit": unit},
+            "67-0-setpoint-12": {"unit": unit}}}]})
+    return h
+
+
+def feed(h, leaf, value, ago=0):
+    h.ingest("%s/%s" % (h.base, leaf), _j.dumps(
+        {"time": int((time.time() - ago) * 1000), "value": value}).encode())
+
+
+fails = []
+
+
+def check(name, cond):
+    print(("  OK   " if cond else "  FAIL ") + name)
+    if not cond:
+        fails.append(name)
+
+
+# Retained replay: the broker hands over hours-old values the moment we
+# connect. Arrival time would call them new.
+h = fresh_hvac()
+feed(h, "49/0/Air_temperature", 72, ago=7200)
+s = h.state
+check("a 2h-old retained reading is not fresh", s["fresh"] is False)
+check("its age is reported honestly", 7100 < s["age_s"] < 7300)
+
+# A dead-node notice must not refresh the clock that decides it is alive.
+h = fresh_hvac()
+feed(h, "49/0/Air_temperature", 72)
+h.ingest("%s/status" % h.base, b'{"value": false}')
+s = h.state
+check("a dead node reads offline even with a fresh value",
+      s["alive"] is False and s["online"] is False)
+check("a node that never reported liveness stays unknown",
+      fresh_hvac().state["alive"] is None)
+
+# Temperature scale, which is a property of the device, not an assumption.
+h = fresh_hvac(F); feed(h, "49/0/Air_temperature", 80)
+check("a Fahrenheit device is not converted", h.state["temperature_f"] == 80.0)
+h = fresh_hvac(C); feed(h, "49/0/Air_temperature", 26.5)
+check("a Celsius device is converted", h.state["temperature_f"] == 79.7)
+h = fresh_hvac(None); feed(h, "49/0/Air_temperature", 80)
+s = h.state
+check("an unknown unit yields no Fahrenheit claim",
+      s["temperature_f"] is None and s["temperature_raw"] == 80)
+check("a write is refused while the unit is unknown",
+      h.set_setpoint("cool", 72)[0] is False)
+
+# Operating state, which used to be shifted by two.
+h = fresh_hvac()
+feed(h, "66/0/state", 5)
+check("state 5 is pending cool, not aux heat",
+      h.state["operating_label"] == "Pending cool" and h.state["running"] is False)
+feed(h, "66/0/state", 8)
+check("state 8 decodes instead of falling through",
+      h.state["operating_label"] == "2nd stage heat" and h.state["running"] is True)
+
+# Eco: the eco setpoints are the ones driving the furnace.
+h = fresh_hvac()
+feed(h, "64/0/mode", 11)
+feed(h, "67/0/setpoint/1", 70); feed(h, "67/0/setpoint/11", 62)
+s = h.state
+check("eco mode surfaces the eco setpoint", s["eco"] is True and s["setpoint_heat"] == 62)
+
+# Clamping, at the edges.
+h = fresh_hvac()
+check("45F is allowed", h.set_setpoint("cool", 45)[0] or "no broker" in h.set_setpoint("cool", 45)[1])
+check("44F is refused", h.set_setpoint("cool", 44)[0] is False
+      and "45-90" in h.set_setpoint("cool", 44)[1])
+
+sys.exit(1 if fails else 0)
+PY
+[ $? -eq 0 ] || FAILS=$((FAILS+1))
 
 echo
 echo "== writing =="
 # Ask for the value it already holds, so a success would change nothing.
-CODE=$(post "hvac/cool" '{"value": 72}' | cut -d' ' -f1)
+# Write back the value it already holds. That exercises the whole path -
+# route, clamp, gateway, radio, verdict - without moving anyone's thermostat.
+SP=$(echo "$STATE" | venv/bin/python -c \
+  'import json,sys; v=json.load(sys.stdin).get("setpoint_cool"); print(v if v is not None else "")')
+if [ -z "$SP" ]; then
+  bad "no cool setpoint reported, cannot exercise the write path"
+  SP=72
+fi
+CODE=$(post "hvac/cool" "{\"value\": $SP}" | cut -d' ' -f1)
 echo "  -> $CODE $(cat /tmp/hv.json)"
 # Whether the radio accepts or refuses depends on the thermostat, so both are
 # a pass. What must never happen again is ok:true with nothing behind it.

@@ -2831,7 +2831,7 @@ class Hvac:
 
     # relative topic -> friendly name
     READS = {
-        "49/0/Air_temperature": "temperature_c",
+        "49/0/Air_temperature": "temperature",
         "49/0/Humidity": "humidity",
         "64/0/mode": "mode",
         "66/0/state": "operating_state",
@@ -2873,6 +2873,15 @@ class Hvac:
     WRITABLE_FAN_MODES = (0, 1)
     FAN_STATES = {0: "Idle", 1: "Running", 2: "Running high"}
     SETPOINTS = {"heat": 1, "cool": 2}
+    # Which gateway value ids carry a temperature, and so a unit worth having.
+    # This thermostat reports Fahrenheit; the same model configured in Celsius
+    # reports Celsius, and the value topics carry only a bare number. Guessing
+    # from the magnitude is how a warm room reads 26.5 F, or 176 F.
+    UNIT_OF = {"49-0-Air temperature": "temperature",
+               "67-0-setpoint-1": "setpoint_heat",
+               "67-0-setpoint-2": "setpoint_cool",
+               "67-0-setpoint-11": "setpoint_heat_eco",
+               "67-0-setpoint-12": "setpoint_cool_eco"}
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -2881,6 +2890,8 @@ class Hvac:
         self._client = None
         # Liveness is kept apart from the readings on purpose - see ingest().
         self._alive = None
+        # Units, as declared by the gateway. Empty until it answers.
+        self._units: dict = {}
         # Writes awaiting the gateway's verdict, keyed by the args we sent,
         # because that is exactly what the gateway echoes back.
         self._pending: dict = {}
@@ -2895,6 +2906,8 @@ class Hvac:
         self._client = client
         client.subscribe(f"{self.base}/#", qos=0)
         client.subscribe(f"{HVAC_PREFIX}/{HVAC_GATEWAY}/api/writeValue", qos=0)
+        client.subscribe(f"{HVAC_PREFIX}/{HVAC_GATEWAY}/api/getNodes", qos=0)
+        self._ask_units()
 
     def handles(self, topic: str) -> bool:
         return topic.startswith(f"{HVAC_PREFIX}/")
@@ -2906,6 +2919,9 @@ class Hvac:
             return
         if topic == f"{HVAC_PREFIX}/{HVAC_GATEWAY}/api/writeValue":
             self._reply(body)
+            return
+        if topic == f"{HVAC_PREFIX}/{HVAC_GATEWAY}/api/getNodes":
+            self._absorb_units(body)
             return
         if not topic.startswith(self.base + "/"):
             return
@@ -2953,9 +2969,72 @@ class Hvac:
         slot[0].set()
 
     # -- present ------------------------------------------------------------
+    # -- units --------------------------------------------------------------
+    def _ask_units(self) -> None:
+        """Ask the gateway what units this node reports in."""
+        if self._client is None:
+            return
+        try:
+            self._client.publish(
+                f"{HVAC_PREFIX}/{HVAC_GATEWAY}/api/getNodes/set",
+                json.dumps({"args": []}), qos=1)
+        except Exception as exc:
+            log.warning("HVAC: could not ask for units: %s", exc)
+
+    def _absorb_units(self, body) -> None:
+        if not isinstance(body, dict):
+            return
+        try:
+            want = int(HVAC_NODE.rsplit("_", 1)[-1])
+        except ValueError:
+            return
+        node = next((n for n in (body.get("result") or [])
+                     if isinstance(n, dict) and n.get("id") == want), None)
+        if not node:
+            return
+        found = {}
+        for vid, meta in (node.get("values") or {}).items():
+            name = self.UNIT_OF.get(vid)
+            if name and isinstance(meta, dict) and meta.get("unit"):
+                found[name] = meta["unit"]
+        if found:
+            with self._lock:
+                self._units.update(found)
+            log.info("HVAC: units from the gateway: %s", found)
+
+    def _wait_for_units(self, seconds: int = 5) -> dict:
+        """Units, asking again if we have not been told yet."""
+        with self._lock:
+            if self._units:
+                return dict(self._units)
+        self._ask_units()
+        deadline = time.time() + seconds
+        while time.time() < deadline:
+            time.sleep(0.2)
+            with self._lock:
+                if self._units:
+                    return dict(self._units)
+        return {}
+
+    # -- present ------------------------------------------------------------
     @staticmethod
-    def _f(celsius):
-        return None if celsius is None else round(celsius * 9 / 5 + 32, 1)
+    def _to_f(value, unit):
+        """A reading in Fahrenheit, or None when the unit is not known.
+
+        None rather than a guess: a number shown under the wrong unit is worse
+        than a dash, because it looks like an answer.
+        """
+        if value is None or unit is None:
+            return None
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return None
+        if unit == "\u00b0C":
+            return round(value * 9 / 5 + 32, 1)
+        if unit == "\u00b0F":
+            return round(value, 1)
+        return None
 
     @property
     def state(self) -> dict:
@@ -2963,6 +3042,7 @@ class Hvac:
             v = dict(self._values)
             newest = max(self._seen_at.values(), default=0)
             alive = self._alive
+            units = dict(self._units)
         mode = v.get("mode")
         fan_mode = v.get("fan_mode")
         op = v.get("operating_state")
@@ -2976,19 +3056,25 @@ class Hvac:
         # In an eco mode the eco setpoints are the ones driving the furnace;
         # the ordinary pair controls nothing. Show and edit the live ones.
         eco = mode in (11, 12)
-        sp_heat = v.get("setpoint_heat_eco" if eco else "setpoint_heat")
-        sp_cool = v.get("setpoint_cool_eco" if eco else "setpoint_cool")
-        # The sensor reports Celsius while the setpoints are Fahrenheit -
-        # the thermostat's own doing. Everything is presented in F so the
-        # page never shows two scales side by side.
+        heat_key = "setpoint_heat_eco" if eco else "setpoint_heat"
+        cool_key = "setpoint_cool_eco" if eco else "setpoint_cool"
+        sp_heat = self._to_f(v.get(heat_key), units.get(heat_key))
+        sp_cool = self._to_f(v.get(cool_key), units.get(cool_key))
+        # Everything is presented in Fahrenheit whatever the device reports,
+        # so the page never shows two scales at once - but only where the
+        # gateway has told us the unit. Where it has not, the raw number and
+        # the unknown unit go up instead of a confident wrong one.
         return {
             "online": online,
             "fresh": fresh,
             "alive": alive,
             "age_s": round(age) if age is not None else None,
             "node": HVAC_NODE,
-            "temperature_f": self._f(v.get("temperature_c")),
-            "temperature_c": v.get("temperature_c"),
+            "temperature_f": self._to_f(v.get("temperature"),
+                                        units.get("temperature")),
+            "temperature_raw": v.get("temperature"),
+            "temperature_unit": units.get("temperature"),
+            "units_known": bool(units),
             "humidity": v.get("humidity"),
             "battery": v.get("battery"),
             "mode": mode,
@@ -3079,7 +3165,18 @@ class Hvac:
         with self._lock:
             eco = self._values.get("mode") in (11, 12)
         key = self.SETPOINTS[which] + (10 if eco else 0)
-        return self._write(67, "setpoint", wanted, property_key=key)
+        # The page speaks Fahrenheit. Send whatever the device speaks, and
+        # refuse rather than guess - a Fahrenheit number written to a Celsius
+        # thermostat is a command to make the house uninhabitable.
+        name = ("setpoint_%s%s" % (which, "_eco" if eco else ""))
+        unit = self._wait_for_units().get(name)
+        if unit == "\u00b0C":
+            device_value = round((wanted - 32) * 5 / 9, 1)
+        elif unit == "\u00b0F":
+            device_value = wanted
+        else:
+            return False, "the thermostat has not reported its temperature unit"
+        return self._write(67, "setpoint", device_value, property_key=key)
 
     def set_mode(self, mode) -> tuple[bool, str]:
         try:

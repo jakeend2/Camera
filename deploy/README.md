@@ -474,15 +474,56 @@ with the node id alone and watch for interview stages in the log.
 
 A node in that state still answers `pingNode` and is not a failed node, which
 is what makes it confusing: the radio link is fine, only the interrogation
-never happened.
+never happened. `refreshInfo` does not always rescue it either - on the second
+occasion the node sat at `interviewStage: 'None'` through a refresh, a gateway
+restart and four minutes of watching. Excluding and re-including it fixed it in
+one go. If a node has no manufacturer and no command classes after one refresh,
+re-pair rather than keep poking.
+
+The same shape appears on writes, and it is worse there because it reaches the
+house:
+
+```
+writeValue  ->  {"success": true, "result": {"status": 2}}
+log         ->  Node 2 does not support the Command Class Thermostat Setpoint!
+                Unable to write 73 on 67-0-setpoint-2: Fail
+```
+
+`success` means the API call was dispatched, nothing more. The outcome is
+`result.status`, a zwave-js `SetValueStatus`:
+
+| status | meaning |
+|---|---|
+| 0 | the device does not support it |
+| 1 | queued - accepted, but not applied until the device wakes |
+| 2 | failed |
+| 3 / 4 / 5 | no such endpoint / not implemented / value rejected |
+| 254 / 255 | applied |
+
+Anything that publishes a command and returns success without reading that
+reply is guessing. This service waits for the verdict and shows it, and
+distinguishes *applied* from *queued*, because a command sitting in a queue for
+a sleeping device has not changed anything yet.
 
 ### What is paired
 
 ```
 node 1   Silicon Labs 700/800 Series (the controller itself)
-node 2   Honeywell TH6320ZW - T6 Pro Z-Wave thermostat, firmware 1.3
+node 3   Honeywell TH6320ZW - T6 Pro Z-Wave thermostat, firmware 1.3
 node 255 broadcast pseudo-node, not a real device
 ```
+
+It is node 3, not node 2, because the first inclusion produced a node that
+pinged but never interviewed; re-pairing it took the next free id. **Node ids
+are not stable across a re-pair**, and two things have to follow it:
+
+- `HVAC_NODE` in `/etc/camera-service.env` (`nodeID_3` here). Left alone, the
+  service happily watches a node that no longer exists and shows its last
+  known values forever.
+- The dead node's retained MQTT topics. zwave-js-ui publishes retained, so 69
+  topics under `hvac/nodeID_2/` outlived the node itself and anything reading
+  `hvac/#` saw two thermostats. Clear them by publishing an empty retained
+  message to each as the `zwave` user.
 
 The thermostat exposes 69 values. The ones worth surfacing:
 
@@ -565,6 +606,61 @@ Done from the web UI on port 8091, because inclusion needs the device in
 your hands: put the controller into inclusion mode, trigger inclusion on the
 device, and enter the DSK when prompted for an S2 device. Nothing about that
 can be scripted from here.
+
+---
+
+## The thermostat
+
+The CLIMATE panel reads the Honeywell over MQTT and writes through the
+gateway's own API. It never publishes device state - the broker ACL enforces
+that, so the service can *ask* for a change but cannot claim a reading it did
+not see. Verified by trying: publishing a fake temperature as the `camera`
+user is refused and the real value stands.
+
+### Units come from the gateway, never from the number
+
+The value topics carry a bare number. The same thermostat model reports
+Fahrenheit or Celsius depending on how it is configured, and this one reports
+Fahrenheit:
+
+```
+49-0-Air temperature   value=80   unit=°F
+67-0-setpoint-2        value=71   unit=°F
+```
+
+The unit is in the node metadata from `getNodes`, which the service asks for
+on connect and caches. Assuming Celsius and converting made a comfortable room
+read **176 °F**. Where the unit is not known the panel shows the raw number and
+the unit as `?` rather than a confident wrong one, and setpoint writes are
+refused outright - a Fahrenheit number written to a Celsius thermostat is a
+command to make the house uninhabitable.
+
+### What the panel will and will not claim
+
+- Freshness comes from the timestamp in each payload, not from when the
+  message arrived. The broker replays every retained value on reconnect, so
+  arrival time made hour-old readings look new after every restart.
+- Liveness is separate from freshness and is `true` / `false` / **unknown**.
+  "the gateway says this node is dead" and "nothing heard lately" are
+  different faults, and a node that has reported neither is a third.
+- Setpoint taps are gathered and sent once the user stops adjusting. Every
+  command is a radio round-trip, so holding `+` five times must be one command
+  at the end, not five queued at the radio.
+- Mode changes confirm first; they can start or stop the whole system. The fan
+  does not.
+- Setpoints are clamped to 45-90 °F in the page **and** on the server.
+
+### Checking it
+
+```bash
+bash deploy/verify-hvac.sh
+```
+
+Exercises the real service - systemd sandbox, TLS, session cookie - for
+reading, writing, refusals and authentication, then feeds the class known
+payloads for the cases the house will not reproduce on demand: retained
+replay, a dead node, a Celsius device, a shifted operating state. It exists
+because the write bug was invisible to anything that trusted the reply.
 
 ---
 
