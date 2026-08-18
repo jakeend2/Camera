@@ -76,6 +76,69 @@
            encodeURIComponent(currentCam);
   }
 
+  /* An <img> keeps painting its last frame until the next one arrives, and a
+   * substream preview takes about four seconds to produce that first frame.
+   * So switching used to leave the previous camera's picture on screen under
+   * the new camera's name - measured at 4.8s from cold. A wrong picture that
+   * looks right is worse than no picture, so blank it and say what is going
+   * on until a real frame lands.
+   */
+  var BLANK = "data:image/gif;base64,"
+            + "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
+  var feedToken = 0;
+
+  function showFeed(cid) {
+    if (!feed) return;
+    var frame = $("video-frame");
+    var name = (camInfo(cid).name || cid).toUpperCase();
+    var token = ++feedToken;
+
+    if (frame) {
+      frame.dataset.msg = "STARTING " + name;
+      frame.classList.add("switching");
+    }
+    feed.src = BLANK;                    // drop the other camera's frame now
+
+    var src = withCam("/camera");
+    src += (src.indexOf("?") >= 0 ? "&" : "?") + "_=" + Date.now();
+
+    function live() {
+      // A later switch may already own the frame, and the blank placeholder
+      // fires load as well - but it is 1x1, so its size tells it apart from a
+      // real frame. Comparing the URL instead was brittle: anything that
+      // touched the query string left the overlay stuck over a live picture.
+      if (token !== feedToken) return;
+      if (feed.naturalWidth <= 2) return;
+      feed.removeEventListener("load", live);
+      if (frame) frame.classList.remove("switching");
+    }
+    feed.addEventListener("load", live);
+    feed.src = src;
+
+    setTimeout(function () {
+      if (token !== feedToken || !frame) return;
+      if (frame.classList.contains("switching")) {
+        frame.dataset.msg = "NO PICTURE FROM " + name;
+      }
+    }, 15000);
+  }
+
+  /* Warm the previews we are not looking at, so a switch has a frame waiting
+   * instead of spending four seconds on a handshake and a keyframe. Only
+   * while the page is visible: hidden, they linger out by themselves and go
+   * back to costing nothing.
+   */
+  function warmOthers() {
+    if (document.hidden) return;
+    camButtons.forEach(function (b) {
+      var cid = b.dataset.selectCam;
+      if (!cid || cid === currentCam) return;
+      fetch("/preview/warm?cam=" + encodeURIComponent(cid),
+            { method: "POST", credentials: "include" })
+        .catch(function () {});
+    });
+  }
+
   function applyCamera(cid, reloadFeed) {
     currentCam = cid;
     try { localStorage.setItem("selectedCam", cid); } catch (e) {}
@@ -111,9 +174,7 @@
       // Cache-bust so switching back to a camera restarts its stream rather
       // than reattaching to a response the browser considers finished.
       lastFrames = -1;
-      var src = withCam("/camera");
-      feed.src = src + (src.indexOf("?") >= 0 ? "&" : "?") +
-                 "_=" + Date.now();
+      showFeed(cid);
       var seg = $("st-link");
       if (seg) { seg.textContent = "LINK ·"; seg.classList.remove("bad"); }
     }
@@ -124,9 +185,20 @@
     btn.addEventListener("click", function () {
       if (btn.dataset.selectCam !== currentCam) {
         applyCamera(btn.dataset.selectCam, true);
+        warmOthers();          // the one we just left, so coming back is instant
       }
     });
   });
+
+  if (camButtons.length > 1) {
+    warmOthers();
+    // PREVIEW_LINGER is 60s; well inside it, so a warmed feed never lapses
+    // while the page is open.
+    setInterval(warmOthers, 25000);
+    document.addEventListener("visibilitychange", function () {
+      if (!document.hidden) warmOthers();
+    });
+  }
   var speed = parseInt(localStorage.getItem("ptzSpeed"), 10)
               || parseInt(app.dataset.defaultSpeed, 10) || 25;
 

@@ -974,3 +974,30 @@ a { color: var(--blue); }
 
   .rail { flex: 0 0 min(46%, 380px); }
 }
+
+/* ------------------------------------------------------- feed switching -- */
+/* While a feed is starting, say so instead of leaving the previous camera's
+   last frame on screen. See showFeed(): an <img> paints its last frame until
+   the next arrives, and a substream preview takes ~4s to produce one, so the
+   wrong camera used to sit there wearing the right camera's name. */
+.video-frame.switching img { visibility: hidden; }
+
+.video-frame.switching::after {
+  content: attr(data-msg);
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  padding: 0 12px;
+  text-align: center;
+  background: var(--black);
+  color: var(--orange);
+  font-weight: 700;
+  font-size: 0.85rem;
+  letter-spacing: 0.12em;
+}
+
+/* The strip names the camera, which is the thing worth reading while there is
+   no picture, so it stays above the message. */
+.status-strip { z-index: 2; }

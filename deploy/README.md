@@ -831,6 +831,67 @@ session is a resource on the device itself. Cold start to first frame is about
 6.5 seconds, which `/health` reports as `preview_running` so the page can say
 so instead of showing a dead frame.
 
+### Switching cameras, and the four seconds nobody sees any more
+
+An `<img>` keeps painting its last frame until the next one arrives. A
+substream preview needs an RTSP handshake and then the wait for the next
+keyframe before it can produce that frame, measured repeatedly on this camera:
+
+```
+backyard, cold   4.0 - 4.8 s to first frame
+backyard, warm   0.08 s
+mic612           0.14 s   (its preview is a second output of the recorder)
+```
+
+So switching used to leave the *other* camera's picture on screen, under the
+new camera's name, for about four seconds - and doing it a few times appeared
+to fix it, because `PREVIEW_LINGER` had kept the feed warm by then. A wrong
+picture that looks right is the worst failure this project has, so two things
+changed:
+
+- The page blanks the image and says `STARTING BACKYARD` until a real frame
+  lands. It tells a real frame from the blank placeholder by size, not by URL:
+  comparing the URL left the overlay stuck over a live picture the moment
+  anything touched the query string.
+- `POST /preview/warm?cam=<id>` starts a preview without streaming it, and the
+  page warms the feeds it is *not* showing while it is open and visible. So
+  the feed is already running when you tap the switcher. This costs 18% of one
+  core per warmed camera, measured, and nothing once the tab is hidden and the
+  linger expires. A camera whose preview comes free from the recorder answers
+  `needed: false`.
+
+Trimming ffmpeg's startup does not help and was not shipped: `-probesize` and
+`-analyzeduration` changed nothing, and `-fflags nobuffer -flags low_delay`
+made it *worse* - 8s against 4s. The wait is the keyframe, not the probing.
+
+### The Backyard frame rate stops at the camera
+
+The substream is fixed at 640x480 and **10 fps**, both declared and measured
+by counting frames. `-vf fps=N` cannot invent frames that were never sent, so
+raising the number in this repo would only duplicate them.
+
+Raising it for real is a change **on the camera**, and this camera's HTTP API
+is switched off - ports 80 and 443 are both closed, only 554 (RTSP), 8000 and
+9000 answer - so it cannot be done from here. It has to be done in the Reolink
+app: sub stream, frame rate. Then set `CAM_BACKYARD_PREVIEW_FPS` to match,
+which is why that value now reads from the environment.
+
+What it costs here, measured on this Pi:
+
+| Preview source | CPU |
+|---|---|
+| substream -> mjpeg 10 fps (today) | 18% of a core |
+| substream -> mjpeg 15 fps | 25% |
+| substream -> mjpeg 20 fps | 32% |
+| **main** stream 2560x1920 -> scale 640 -> mjpeg 20 fps | **187%** |
+
+The main stream is the only route to 20 fps without touching the camera, and
+187% of a core is not available on a box already running an encode and two
+recordings. `h264_v4l2m2m` is in this ffmpeg build but its device node is not
+present, so hardware decode is not an option either. If the Backyard preview
+ever needs to match the MIC's 20 fps, that is a hardware conversation, not a
+configuration one.
+
 ### Retention
 
 Per camera, and deliberately equal here. A day that has one angle but not the
