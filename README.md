@@ -93,61 +93,68 @@ that costs and how it is confined.
 
 ## Inside `camera.service`
 
-Two processes. The Python process owns the hardware and the web interface; a
-supervised ffmpeg owns every pixel.
+Three processes, sometimes four. The Python process owns the hardware and the
+web interface; one supervised ffmpeg per camera owns every pixel; a fourth
+appears only while somebody is watching the network camera's preview.
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│  camera.service            runs as the unprivileged 'camera' account    │
-│                                                                         │
-│  ┌───────────────────────────────────────────────────────────────────┐  │
-│  │  camera_service.py                                    23 threads  │  │
-│  │                                                                   │  │
-│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌──────────┐  │  │
-│  │  │  recorder   │  │  retention  │  │ mqtt-state  │  │  cheroot │  │  │
-│  │  │             │  │             │  │             │  │  server  │  │  │
-│  │  │ spawns and  │  │ hourly:     │  │ every 30s:  │  │          │  │  │
-│  │  │ restarts    │  │ delete days │  │ publish     │  │ 16 worker│  │  │
-│  │  │ ffmpeg,     │  │ older than  │  │ health to   │  │ threads, │  │  │
-│  │  │ reads its   │  │ 14, enforce │  │ MQTT        │  │ TLS 1.2+ │  │  │
-│  │  │ preview     │  │ 50 GB floor │  │             │  │ :5000    │  │  │
-│  │  │ pipe        │  │             │  │             │  │          │  │  │
-│  │  └──────┬──────┘  └─────────────┘  └─────────────┘  └────┬─────┘  │  │
-│  │         │                                                │        │  │
-│  │         │ JPEG frames                     latest frame   │        │  │
-│  │         └──────────────► FrameBuffer ◄─────────────────  ┘        │  │
-│  │                          (condition variable, latest wins)        │  │
-│  │                                                                   │  │
-│  │  ┌─────────────┐  ┌─────────────┐                                 │  │
-│  │  │ mqtt client │  │     PTZ     │  one lock per serial port, so   │  │
-│  │  │ (paho loop) │  │  pelcoD.py  │  overlapping requests cannot    │  │
-│  │  │ subscribes  │──►             │  interleave two 7-byte frames   │  │
-│  │  │ ptz/set     │  │ /dev/serial │                                 │  │
-│  │  └─────────────┘  └──────┬──────┘                                 │  │
-│  └────────────────────────────┼──────────────────────────────────────┘  │
-│                               │                                         │
-│  ┌────────────────────────────┼──────────────────────────────────────┐  │
-│  │  ffmpeg (child process)    │                                      │  │
-│  │                            ▼  RS-485 out to the camera            │  │
-│  │   /dev/v4l/by-id/…  MJPEG 1280x720 @20fps                         │  │
-│  │        │                                                          │  │
-│  │        ▼                                                          │  │
-│  │   drawtext  ── burn in the timestamp                              │  │
-│  │        │                                                          │  │
-│  │      split ──┬─── fps=10 ─ libx264 ─ segment ──► videos/DATE.ts   │  │
-│  │              │                       cut at local midnight        │  │
-│  │              └─── fps=20 ─ scale 640 ─ mjpeg ──► stdout pipe      │  │
-│  └───────────────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────┐
+│  camera.service                 runs as the unprivileged 'camera' account│
+│                                                                          │
+│  ┌────────────────────────────────────────────────────────────────────┐  │
+│  │  camera_service.py                                     43 threads  │  │
+│  │                                                                    │  │
+│  │   recorder     one supervisor per camera: spawn ffmpeg, restart it │  │
+│  │                with backoff, read its preview pipe                 │  │
+│  │   retention    hourly: drop each camera's days past ITS OWN window │  │
+│  │                (7 here), then enforce the 50 GB floor oldest-first │  │
+│  │   mqtt-state   every 30s: publish a health snapshot per camera     │  │
+│  │   mqtt client  subscribes camera/<cid>/ptz/set  (paho loop)        │  │
+│  │   ratgdo       every 2s: poll the garage over HTTP digest auth,    │  │
+│  │                republish to MQTT as its own broker identity        │  │
+│  │   hvac         listens to the Z-Wave gateway's topics; writes only │  │
+│  │                through the gateway's API, never device state       │  │
+│  │   cheroot      32 workers, TLS 1.2+, :5000                         │  │
+│  │                                                                    │  │
+│  │   FrameBuffer  one per camera. Condition variable, latest wins -   │  │
+│  │                a slow viewer drops frames instead of stalling      │  │
+│  │   PTZ          pelcoD.py -> /dev/pelco-d, one lock per serial port │  │
+│  │                so two 7-byte frames cannot interleave              │  │
+│  └────────────────────────────────────────────────────────────────────┘  │
+│                                                                          │
+│  ┌────────────────────────────────────────────────────────────────────┐  │
+│  │  ffmpeg: mic612          analog in, so every frame is encoded here │  │
+│  │                                                                    │  │
+│  │   /dev/v4l/by-id/…  MJPEG 1280x720 @20fps                          │  │
+│  │        -> drawtext (burn in the timestamp)                         │  │
+│  │        -> split ─┬─ fps=10, libx264 ─► videos/mic612/DATE.ts       │  │
+│  │                  │                     cut at local midnight       │  │
+│  │                  └─ fps=20, scale 640, mjpeg ─► stdout pipe        │  │
+│  │                                          ~150% of a core           │  │
+│  └────────────────────────────────────────────────────────────────────┘  │
+│                                                                          │
+│  ┌────────────────────────────────────────────────────────────────────┐  │
+│  │  ffmpeg: backyard        already H.264, so the bitstream is copied │  │
+│  │                                                                    │  │
+│  │   rtsp main 2560x1920 @20fps ─ c:v copy ─► videos/backyard/DATE.ts │  │
+│  │        no filter, not even a timestamp: any filter would force a   │  │
+│  │        full decode and the ~4%-of-a-core saving would evaporate    │  │
+│  └────────────────────────────────────────────────────────────────────┘  │
+│                                                                          │
+│  ┌────────────────────────────────────────────────────────────────────┐  │
+│  │  ffmpeg: backyard preview      ON DEMAND, plus PREVIEW_LINGER (60s)│  │
+│  │                                                                    │  │
+│  │   rtsp sub 640x480 @15fps ─ mjpeg ─► stdout pipe   23% of a core   │  │
+│  │        a separate process on the substream, because the main       │  │
+│  │        stream must reach the disk untouched                        │  │
+│  └────────────────────────────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────────────────────────────┘
 ```
 
-Python never touches pixel data. It shuttles already-encoded JPEG bytes from
-ffmpeg's pipe to browsers, which is why it sits at about 1.5% CPU while ffmpeg
-uses roughly 1.25 cores.
-
-The recorder thread is a supervisor: if ffmpeg dies it restarts it with
-backoff, and preserves any existing recording for the current day as
-`DATE.partNN.ts` rather than letting the new run truncate it.
+The two cameras cost very different amounts, and that asymmetry is the reason
+for most of the design above. Recording the analog camera means encoding it;
+recording the network camera means copying bytes. Nothing is allowed to put a
+filter in the network camera's path.
 
 ---
 
@@ -174,12 +181,82 @@ they cannot drift apart.
 Video only ever flows one way:
 
 ```
-   camera ──► dongle ──► ffmpeg ──┬──► videos/2026-08-15.ts   (on disk, 14 days)
+   camera ──► dongle ──► ffmpeg ──┬──► videos/<cid>/2026-08-15.ts  (7 days)
                                   │
                                   └──► FrameBuffer ──► GET /camera  (multipart
                                                         MJPEG, one encode
                                                         shared by all viewers)
 ```
+
+---
+
+## HTTP surface
+
+Forty-two routes. Every one requires a session except `/login` and `/static`
+(`PUBLIC_ENDPOINTS`), and anything scripted gets a 401 in JSON rather than a
+redirect to the login form.
+
+Routes marked **cam** accept `?cam=<id>` and act on that camera; without it
+they act on `PRIMARY_CAMERA`.
+
+### Pages
+
+| Route | | |
+|---|---|---|
+| `GET /` | | the live page |
+| `GET /watch`, `/watch/<day>` | cam | the archive player |
+| `GET /recordings` | cam | the file list |
+| `GET,POST /login` | | the only public route besides static files |
+| `GET /logout` | | |
+
+### Live video
+
+| Route | | |
+|---|---|---|
+| `GET /camera` | cam | MJPEG stream, `multipart/x-mixed-replace` |
+| `GET /snapshot` | cam | the latest frame as a downloadable JPEG |
+| `POST /preview/warm` | cam | start a substream preview without streaming it |
+| `GET /health` | cam | whole-service health, or one camera's with `?cam=` |
+
+### Archive
+
+| Route | | |
+|---|---|---|
+| `GET /timeline` | cam | what footage exists for a day, and where the holes are |
+| `GET /play` | cam | a bounded, seekable MP4 window |
+| `GET /clip` | cam | cut `[from, to]` out and hand back a real MP4 |
+| `GET /recordings/<name>` | cam | one recording, by filename |
+
+### PTZ — all POST, all refused for a camera with no motors
+
+Eighteen action routes are registered from `HTTP_PTZ_ROUTES` rather than
+written out as decorators, because `templates/index.html` already posted to
+these exact paths and the keys must not change:
+
+```
+/pan_left  /pan_right  /tilt_up  /tilt_down  /stop
+/zoom_tele /zoom_wide  /focus_near /focus_far  /iris_open /iris_close
+/OSD_menu  /Thermal_Camera /Visible_Light_Camera
+/Windshield_Wiper /Wiper_Off  /Tour_1 /Tour_2
+```
+
+Plus:
+
+| Route | | |
+|---|---|---|
+| `POST /move` | cam | combined-axis motion for the D-pad |
+| `POST /Set_preset`, `/Goto_preset`, `/Clear_preset` | cam | 1-79 only; 33, 34, 62 and 80-99 are camera functions and are refused |
+| `POST /Start_New_File` | cam | close today's file early, open a fresh one |
+| `POST /Exit_program` | | ask systemd to restart the service |
+
+### The rest of the house
+
+| Route | |
+|---|---|
+| `GET /garage` | door, light, remote lock, obstruction |
+| `POST /garage/<what>` | `door` / `light` / `lock` - each states the state it wants |
+| `GET /hvac` | temperature, mode, setpoints, liveness |
+| `POST /hvac/<what>` | `heat` / `cool` / `mode` / `fan`, clamped server-side |
 
 ---
 

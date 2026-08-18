@@ -32,7 +32,7 @@ something you invoke with `sudo` rather than something that happens by itself.
 | Project root | `/opt/camera` — owned `pi:camera`; **pi** edits, **camera** runs |
 | Service account | `camera`, system user, `nologin`, no sudo |
 | Web UI | `https://camera.<domain>:5000` (LAN `192.168.1.77`), user `admin` |
-| Recordings | `/opt/camera/videos/YYYY-MM-DD.ts`, 14-day retention |
+| Recordings | `/opt/camera/videos/<cid>/YYYY-MM-DD.ts`, 7-day retention per camera |
 | Timezone | `America/New_York` — this defines when a "day" ends |
 
 The project lives in `/opt`, not a home directory, because `/home/pi` is mode

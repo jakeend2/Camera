@@ -60,6 +60,50 @@ stale = sorted(documented - code_names - EXTERNAL)
 check(not stale, "no settings documented that the code never reads%s"
       % ("" if not stale else " - stale: " + ", ".join(stale)))
 
+print("\n== every HTTP route is documented ==")
+# Counting only @app.route decorators gives 24 and misses the 18 PTZ routes
+# registered in a loop from HTTP_PTZ_ROUTES - a check that undercounts is
+# worse than none, because it reports success over a gap.
+code = CODE.read_text(encoding="utf-8")
+routes = set(re.findall(r'@app\.route\(\s*"([^"]+)"', code))
+block = re.search(r"HTTP_PTZ_ROUTES\s*=\s*\{(.*?)\}", code, re.S)
+if block:
+    routes |= set(re.findall(r'"(/[^"]*)"\s*:', block.group(1)))
+docs = "\n".join(p.read_text(encoding="utf-8")
+                 for p in (ROOT / "README.md", README) if p.exists())
+undocumented = sorted(
+    r for r in routes
+    if r != "/" and r.split("<")[0].rstrip("/") not in docs)
+check(len(routes) >= 40, "found the whole route table (%d routes)" % len(routes))
+check(not undocumented, "all %d routes appear in the documentation%s" % (
+    len(routes), "" if not undocumented
+    else " - missing: " + ", ".join(undocumented)))
+
+print("\n== the docs quote the real recording layout and window ==")
+# Both of these were wrong at the same time: the docs described
+# videos/YYYY-MM-DD.ts on a 14-day window, from before cameras had their own
+# directories and before retention was unified at 7. A path without a camera
+# segment is the tell.
+docs_files = [ROOT / "README.md", README]
+bad_paths, bad_window = [], []
+retention = re.search(r'RETENTION_DAYS\", (\d+)\)', code)
+want = retention.group(1) if retention else None
+for f in docs_files:
+    if not f.exists():
+        continue
+    for n, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+        # videos/ followed straight by a date or a date placeholder
+        if re.search(r"videos/(?:\d{4}-|YYYY-|DATE\b|\$\(date)", line):
+            bad_paths.append("%s:%d" % (f.name, n))
+        if want and re.search(r"\b(\d+)[- ]day", line):
+            for m in re.finditer(r"\b(\d+)[- ]day", line):
+                if m.group(1) != want and "retention" in line.lower():
+                    bad_window.append("%s:%d says %s-day" % (f.name, n, m.group(1)))
+check(not bad_paths, "no recording path is missing its camera directory%s"
+      % ("" if not bad_paths else " - " + ", ".join(bad_paths)))
+check(not bad_window, "retention windows quoted match RETENTION_DAYS=%s%s"
+      % (want, "" if not bad_window else " - " + ", ".join(bad_window)))
+
 print("\n== the installer covers what the deployment actually contains ==")
 inst = INSTALL.read_text(encoding="utf-8") if INSTALL.exists() else ""
 for label, needles in [
