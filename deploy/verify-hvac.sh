@@ -142,6 +142,14 @@ feed(h, "66/0/state", 8)
 check("state 8 decodes instead of falling through",
       h.state["operating_label"] == "2nd stage heat" and h.state["running"] is True)
 
+# Running is normal operation. The page colours heating and cooling from this
+# rather than flagging them as faults.
+for state, kind in ((1, "heat"), (2, "cool"), (3, "fan"), (8, "heat"),
+                    (0, None), (5, None)):
+    feed(h, "66/0/state", state)
+    check("state %s is %s" % (state, kind or "not a running state"),
+          h.state["running_kind"] == kind)
+
 # Eco: the eco setpoints are the ones driving the furnace.
 h = fresh_hvac()
 feed(h, "64/0/mode", 11)

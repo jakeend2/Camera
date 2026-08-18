@@ -2858,6 +2858,12 @@ class Hvac:
     # Whether the system is actually moving heat or air. Decided here from the
     # number rather than by string-matching a label in the browser.
     RUNNING_STATES = (1, 2, 3, 7, 8, 9, 10, 11)
+    # ...and which of the two it is doing, so the page can colour it. Heating
+    # and cooling are the system working correctly. They must not share the
+    # alarm colour with a flat battery or a thermostat that has stopped
+    # answering, or the alarm colour stops meaning anything.
+    RUNNING_KIND = {1: "heat", 7: "heat", 8: "heat", 10: "heat", 11: "heat",
+                    2: "cool", 9: "cool", 3: "fan"}
     # zwave-js SetValueStatus. "success" in a gateway reply only means the API
     # call was dispatched - a write the driver refused still comes back
     # success:true. The status is the part that says what the radio did.
@@ -3082,6 +3088,7 @@ class Hvac:
             "operating_state": op,
             "operating_label": self.OPERATING.get(op, "?"),
             "running": op in self.RUNNING_STATES,
+            "running_kind": self.RUNNING_KIND.get(op),
             "fan_mode": fan_mode,
             "fan_label": self.FAN_MODES.get(fan_mode, "?"),
             "fan_state": v.get("fan_state"),

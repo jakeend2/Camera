@@ -570,8 +570,15 @@
                   : "–", off);
     put("h-hum", h.humidity == null ? "–" : h.humidity + " %");
     put("h-mode", h.mode_label || "–");
-    put("h-op", h.operating_label || "–",
-        !!h.running);
+    // Running is not a fault, so it gets its own colour rather than the red
+    // that means offline or obstructed. The word says which; the colour only
+    // separates heating from cooling.
+    var opEl = $("h-op");
+    if (opEl) {
+      opEl.textContent = h.operating_label || "–";
+      opEl.classList.remove("bad", "state-heat", "state-cool", "state-fan");
+      if (h.running_kind) opEl.classList.add("state-" + h.running_kind);
+    }
     put("h-fan", (h.fan_label || "–") + " / " + (h.fan_state_label || "–"));
     put("h-batt", h.battery == null ? "–" : h.battery + " %", h.battery != null && h.battery < 20);
 

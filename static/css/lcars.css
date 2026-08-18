@@ -899,3 +899,14 @@ a { color: var(--blue); }
    had no rule for dd, so an hour-old temperature looked exactly like a live
    one. This covers the climate, garage and system panels alike. */
 .bad { color: var(--red); }
+
+/* The thermostat actively heating or cooling is normal operation. It used to
+   be painted with .bad, which is the fault colour - and that went unnoticed
+   only because .bad styled nothing at all until it was given a colour. */
+.state-heat { color: var(--orange); }
+.state-cool { color: var(--blue); }
+
+/* Fan-only is active but neither heating nor cooling, so it keeps the default
+   text colour. Stated rather than left to an undefined class, because a class
+   that silently styles nothing is the bug this pair of rules exists to fix. */
+.state-fan { color: var(--text); }
