@@ -324,7 +324,13 @@ elif [ "$DRY_RUN" -eq 1 ]; then
     info "would create MQTT user 'camera'"
 else
     ACTUAL_PW="$(grep -E '^MQTT_PASSWORD=' "$ENV_FILE" | head -1 | cut -d= -f2-)"
-    mosquitto_passwd -c -b /etc/mosquitto/passwd camera "$ACTUAL_PW"
+    # -c only when there is no file yet. With ratgdo and zwave already in it
+    # and the camera line somehow missing, -c would take them out too.
+    if [ -s /etc/mosquitto/passwd ]; then
+        mosquitto_passwd -b /etc/mosquitto/passwd camera "$ACTUAL_PW"
+    else
+        mosquitto_passwd -c -b /etc/mosquitto/passwd camera "$ACTUAL_PW"
+    fi
     chown root:mosquitto /etc/mosquitto/passwd; chmod 640 /etc/mosquitto/passwd
     info "MQTT user 'camera' created."
 fi

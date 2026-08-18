@@ -36,7 +36,13 @@ sudo openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
   -keyout "$DIR/server.key" -out "$DIR/server.crt" -config "$CNF"
 rm -f "$CNF"
 
-sudo chown root:pi "$DIR/server.key" "$DIR/server.crt"
+# The service reads this key as User=camera. Handing it to root:pi works
+# only because install.sh chowns it afterwards - run this script on its own,
+# which is exactly what you do when the address changes, and the web UI stops
+# starting with a permission error that says nothing about certificates.
+SVC_GROUP=camera
+getent group "$SVC_GROUP" >/dev/null || SVC_GROUP=pi
+sudo chown "root:$SVC_GROUP" "$DIR/server.key" "$DIR/server.crt"
 sudo chmod 640 "$DIR/server.key"
 sudo chmod 644 "$DIR/server.crt"
 

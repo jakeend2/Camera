@@ -72,6 +72,7 @@ that is neither is a forgotten step, and `verify-docs.py` fails if one appears.
 | `verify-live.sh` | you | the archive through the running service, in its sandbox |
 | `verify-hvac.sh` | you | the thermostat, live and by injected payloads |
 | `verify-docs.py` | run by install.sh | fails when the docs drift from the code |
+| `rotate-secret.sh` | you | change a generated secret everywhere it lives |
 
 Run all of them before trusting a change:
 
@@ -206,6 +207,10 @@ Copy the two config files from here:
 sudo cp /opt/camera/deploy/mosquitto-local.conf /etc/mosquitto/conf.d/local.conf
 sudo cp /opt/camera/deploy/mosquitto-aclfile   /etc/mosquitto/aclfile
 sudo chown root:mosquitto /etc/mosquitto/aclfile && sudo chmod 640 /etc/mosquitto/aclfile
+# -c CREATES the file, discarding every account already in it. Correct on a
+# fresh box and destructive afterwards: on this one it would delete the ratgdo
+# and zwave identities, and both subsystems would go quiet without an error.
+# To change an existing password, drop the -c.
 sudo mosquitto_passwd -c /etc/mosquitto/passwd camera
 sudo systemctl restart mosquitto
 ```
@@ -445,6 +450,61 @@ sudo tar czf ~/camera-config-backup-$(date +%F).tar.gz \
   /etc/mosquitto/aclfile /etc/mosquitto/conf.d/local.conf \
   /etc/desec-ddns.conf /etc/wireguard /etc/systemd/system/camera.service
 ```
+
+---
+
+## Credentials, and how to change each one
+
+Twenty-one secrets, audited in full. The ones that bite are the ones stored in
+two places at once: change one copy and the subsystem goes quiet without an
+error, because the broker simply refuses the connection and the client retries
+for ever. `rotate-secret.sh` exists for exactly those.
+
+### Change from here
+
+| Secret | Command |
+|---|---|
+| Web UI login | `sudo deploy/set-web-password.sh` |
+| MQTT `camera` | `sudo deploy/rotate-secret.sh mqtt-camera` |
+| MQTT `ratgdo` | `sudo deploy/rotate-secret.sh mqtt-ratgdo` |
+| MQTT `zwave` | `sudo deploy/rotate-secret.sh mqtt-zwave` |
+| Session signing key | `sudo deploy/rotate-secret.sh flask` |
+| TLS key + certificate | `sudo deploy/make-cert.sh <lan-ip>` |
+| A value set on a device | `sudo deploy/rotate-secret.sh set CAM_BACKYARD_PASS` |
+
+### Change on the device, then record it here
+
+| Secret | Where it actually lives |
+|---|---|
+| Reolink camera admin | the Reolink app only - 80 and 443 are closed on the camera |
+| ratgdo web UI | the board's own page at its LAN address |
+| zwave-js-ui admin login | its UI on :8091. One copy, nothing else reads it |
+| deSEC DDNS token | regenerate at desec.io, re-run `setup-desec-ddns.sh` |
+| `pi` account | `passwd` on the Pi |
+
+### Only on suspicion of compromise
+
+WireGuard server key - every client must be reissued. Z-Wave network security
+keys - every device must be excluded and re-paired.
+
+### Traps worth knowing
+
+- **`mosquitto_passwd -c` recreates the file**, discarding every other
+  identity. Right on a fresh box, destructive afterwards.
+- **Quote env values with single quotes.** Several deploy scripts `source`
+  this file; a `$` or a backtick inside double quotes is expanded into
+  something other than what you typed. A password containing a single quote
+  cannot be represented at all - pick a different one.
+- **No leading or trailing whitespace**: `_cam_env()` strips it on read, so
+  the service authenticates with a different string than you stored.
+- **Changing a camera password without restarting looks fine for hours.** The
+  running ffmpeg holds an established RTSP session; it fails at the next
+  restart instead, which reads as a random 3am outage.
+- **An empty `CAM_BACKYARD_PASS` does not error.** `build_cameras()` skips any
+  RTSP camera with no password, so the camera silently disappears and stops
+  recording.
+- **`WEB_PASSWORD_HASH` and `FLASK_SECRET_KEY` are coupled by presence**: both
+  must be non-empty or authentication switches off entirely.
 
 ---
 
