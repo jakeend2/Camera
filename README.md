@@ -1,7 +1,9 @@
 # MIC 612 Camera Control
 
 A Bosch MIC 612 PTZ camera driven from a Raspberry Pi 4: continuous recording,
-a live view in the browser, and pan/tilt/zoom over RS-485.
+a live view in the browser, and pan/tilt/zoom over RS-485. A second camera, a
+garage door and a thermostat have since joined it, all on the same page and all
+on the same rule - open-source libraries, nothing in the cloud, no phone app.
 
 The camera itself is not on the network. Video arrives as analogue signal
 through a USB capture dongle, and control leaves as Pelco-D over a USB serial
@@ -37,16 +39,24 @@ bitrate. That asymmetry is why nothing is allowed to put a filter in the
 network camera's path, not even a timestamp overlay: any filter forces a full
 decode of 2560x1920 and the saving evaporates.
 
-Both USB devices are addressed by `/dev/serial/by-id/…` and `/dev/v4l/by-id/…`,
-never by `ttyUSB0` or `video0`. Those numbers are assigned in probe order, so a
-reboot or an extra USB device can reassign them — and sending Pelco-D frames to
-the wrong adapter is a bad failure to debug.
+Two more devices sit on the LAN rather than on the Pi: a **ratgdo** board
+wired into the garage opener, which the service polls over HTTP and republishes
+to MQTT, and a **SONOFF Z-Wave** stick in the Pi's own USB, which `zwave-js-ui`
+owns and through which the thermostat is reached.
+
+USB devices are addressed by `/dev/v4l/by-id/…` and by udev symlinks bound to
+each adapter's serial number — `/dev/pelco-d` and `/dev/zwave-stick`, from
+`deploy/70-serial-adapters.rules`. Never `ttyUSB0` or `video0`: those numbers
+are assigned in probe order, so a reboot or an extra USB device can reassign
+them. With two serial adapters now on one bus that stopped being a theoretical
+risk — sending Pelco-D frames into a Z-Wave radio is a bad failure to debug,
+so neither service gets blanket `dialout`.
 
 ---
 
 ## What runs, as independent units
 
-Five things start on their own and keep running. Only the first is code from
+These five start on their own and keep running. Only the first is code from
 this repository.
 
 ```
@@ -71,6 +81,13 @@ this repository.
 
 `wg-quick@wg0` and `ufw` show as `active (exited)` — they configure the kernel
 and stop. The interface and the firewall rules outlive the process.
+
+A sixth, `zwave-js-ui.service`, runs wherever a Z-Wave controller is present.
+It owns the radio and republishes every device value to MQTT under `hvac/`,
+and it is the one place this project runs somebody else's application rather
+than a library: Z-Wave is a certification-bound protocol whose security layer
+is not something to hand-roll next to a furnace. `deploy/README.md` covers what
+that costs and how it is confined.
 
 ---
 
@@ -218,8 +235,21 @@ drive the others.
                        "tilt": -1|0|1, "panSpeed": n, "tiltSpeed": n}
    camera/ptz/result   outcome of the last command
 
-   garage/#            reserved for a ratgdo controller  (not yet installed)
-   hvac/#              reserved for a Z-Wave thermostat  (not yet installed)
+   garage/state        retained JSON: door, light, remote lock, obstruction.
+                       Volatile fields (uptime, signal) are excluded, or a
+                       door that has not moved in a week would republish
+                       thirty times a minute
+   garage/<what>/set   subscribed: door | light | lock. Every control states
+                       the state it wants rather than toggling
+
+   hvac/nodeID_<n>/…   published by zwave-js-ui, one topic per Z-Wave value
+   hvac/_CLIENTS/…/api the gateway's own request/response API
+
+The camera service may READ `hvac/#` and WRITE only the gateway's api topic.
+It can ask for a setpoint change; it cannot publish a temperature and claim it
+came from the thermostat. That split is enforced by the broker ACL rather than
+by convention, and it is checked - publishing a fake reading as the `camera`
+user is refused.
 ```
 
 ---

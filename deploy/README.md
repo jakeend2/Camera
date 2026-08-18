@@ -40,6 +40,52 @@ The project lives in `/opt`, not a home directory, because `/home/pi` is mode
 
 ---
 
+## What is in this directory
+
+Every file, and whether `install.sh` places it or you run it yourself. A file
+that is neither is a forgotten step, and `verify-docs.py` fails if one appears.
+
+| File | Placed by install.sh | What it is |
+|---|---|---|
+| `camera-service.env.example` | reference only | every setting the service reads, with defaults |
+| `install.sh` | - | the installer itself |
+| `camera.service` | yes | the systemd unit |
+| `zwave-js-ui.service` | no - see Z-Wave | unit for the Z-Wave gateway |
+| `mosquitto-local.conf` | yes | broker: localhost only, no anonymous |
+| `mosquitto-aclfile` | yes | per-user topic permissions |
+| `60-io-scheduler.rules` | yes | BFQ, so the recorder's ionice means something |
+| `70-serial-adapters.rules` | yes | binds each USB serial adapter by serial number |
+| `make-cert.sh` | run by install.sh | self-signed TLS for the LAN address |
+| `set-web-password.sh` | you | change the web password |
+| `sudoers-pi` | no - deliberate | sudo hardening, applied by hand |
+| `apt-20auto-upgrades.conf` | no - deliberate | unattended-upgrades scheduling |
+| `unattended-upgrades-camera.conf` | no - deliberate | security updates only, no reboots |
+| `setup-dnsmasq.sh` | you | local DNS so the name resolves on the LAN |
+| `setup-letsencrypt.sh` | you | a real certificate instead of the self-signed one |
+| `setup-desec-ddns.sh` | you | dynamic DNS registration |
+| `desec-ddns-update.sh` | by setup-desec-ddns.sh | the periodic update itself |
+| `setup-wireguard.sh` | you | the VPN, needs router access |
+| `wireguard-add-client.sh` | you | add a device to the VPN |
+| `wifi-stabilise.sh` | you | only for the old wireless setup; the Pi is wired now |
+| `verify-archive.py` | you | archive indexing and clip extraction |
+| `verify-multicam.py` | you | per-camera isolation |
+| `verify-live.sh` | you | the archive through the running service, in its sandbox |
+| `verify-hvac.sh` | you | the thermostat, live and by injected payloads |
+| `verify-docs.py` | run by install.sh | fails when the docs drift from the code |
+
+Run all of them before trusting a change:
+
+```bash
+cd /opt/camera
+python3 deploy/verify-docs.py
+venv/bin/python deploy/verify-archive.py
+venv/bin/python deploy/verify-multicam.py
+bash deploy/verify-live.sh
+bash deploy/verify-hvac.sh
+```
+
+---
+
 ## Quick path: the installer
 
 For a fresh machine, `install.sh` does steps 1-6 below in one go - packages,

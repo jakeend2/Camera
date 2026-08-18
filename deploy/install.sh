@@ -9,13 +9,21 @@
 # credentials are never regenerated - a second run will not invalidate a
 # working install.
 #
-# Deliberately NOT covered, because both can lock you out of a headless
-# machine and deserve a human watching:
-#   * the firewall (ufw)
-#   * sudo hardening
-#   * dynamic DNS and WireGuard - they need an external account and router
-#     access, so they are separate opt-in scripts
-# All four are documented in deploy/README.md.
+# Every setting the service reads is listed in
+# deploy/camera-service.env.example. This script writes the secrets and the
+# detected hardware; anything else only needs to appear to override a default.
+#
+# Deliberately NOT covered, each for its own reason, all documented in
+# deploy/README.md:
+#   * the firewall (ufw)      - can lock you out of a headless machine
+#   * sudo hardening          - same; see deploy/sudoers-pi
+#   * dynamic DNS + WireGuard - need an external account and router access,
+#                               so they are separate opt-in scripts
+#   * zwave-js-ui             - a third-party application with its own Node
+#                               runtime and its own admin UI; installing it
+#                               unattended would hide decisions that matter
+#   * the ratgdo firmware     - flashed over USB to a device that is not this
+#                               one. This script only wires up its credentials.
 #
 # Options:
 #   --dry-run          report what would change, touch nothing
@@ -99,6 +107,26 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+say "Device rules"
+# ---------------------------------------------------------------------------
+# Two USB serial adapters share this bus and are first-come-first-served at
+# boot: one carries Pelco-D to a camera, the other is a Z-Wave controller.
+# Sending Pelco-D frames into a Z-Wave radio is a bad failure to debug, so
+# each is bound by its own serial number to a stable name.
+if ! getent group zwave >/dev/null; then
+    info "Creating group 'zwave' (the Z-Wave rule assigns the node to it)."
+    run groupadd --system zwave
+fi
+run install -m 644 "$INSTALL_DIR/deploy/70-serial-adapters.rules" \
+    /etc/udev/rules.d/70-serial-adapters.rules
+# ionice on the recorder is a no-op under mq-deadline; BFQ is what makes it
+# mean anything.
+run install -m 644 "$INSTALL_DIR/deploy/60-io-scheduler.rules" \
+    /etc/udev/rules.d/60-io-scheduler.rules
+run udevadm control --reload-rules
+run udevadm trigger --subsystem-match=tty --subsystem-match=block
+
+# ---------------------------------------------------------------------------
 say "Detecting hardware"
 # ---------------------------------------------------------------------------
 # /dev/v4l/by-id contains only USB capture devices; the Pi's own codec nodes
@@ -124,15 +152,27 @@ if [ -n "$SERIAL_OVERRIDE" ]; then
     SERIAL_PORT="$SERIAL_OVERRIDE"
     info "Serial adapter (given): $SERIAL_PORT"
 else
-    mapfile -t SERIALS < <(ls /dev/serial/by-id/* 2>/dev/null || true)
-    case ${#SERIALS[@]} in
-        0) warn "No USB-serial adapter found. PTZ will be unavailable until one"
-           warn "is present; the service will still record. Pass --serial later."
-           SERIAL_PORT="" ;;
-        1) SERIAL_PORT="${SERIALS[0]}"; info "Serial adapter: $SERIAL_PORT" ;;
-        *) printf '   %s\n' "${SERIALS[@]}" >&2
-           die "More than one USB-serial adapter. Choose with --serial <path>" ;;
-    esac
+    # The rule above gives the PTZ adapter a name of its own, so more than one
+    # adapter is no longer ambiguous - which matters, because this machine has
+    # two and the old code died here rather than choosing.
+    if [ -e /dev/pelco-d ]; then
+        SERIAL_PORT=/dev/pelco-d
+        info "Serial adapter: $SERIAL_PORT (by serial number, stable across boots)"
+    else
+        mapfile -t SERIALS < <(ls /dev/serial/by-id/* 2>/dev/null || true)
+        case ${#SERIALS[@]} in
+            0) warn "No USB-serial adapter found. PTZ will be unavailable until"
+               warn "one is present; the service will still record."
+               SERIAL_PORT="" ;;
+            1) SERIAL_PORT="${SERIALS[0]}"
+               info "Serial adapter: $SERIAL_PORT"
+               warn "Not matched by 70-serial-adapters.rules - add its serial"
+               warn "number there so it keeps this name across reboots." ;;
+            *) printf '   %s\n' "${SERIALS[@]}" >&2
+               warn "More than one adapter and none matched the rule."
+               die "Add their serial numbers to deploy/70-serial-adapters.rules, or pass --serial <path>" ;;
+        esac
+    fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -221,6 +261,26 @@ env_add WEB_USERNAME admin
 env_add VIDEO_DEVICE "$VIDEO_DEVICE"
 [ -n "$SERIAL_PORT" ] && env_add SERIAL_PORT "$SERIAL_PORT"
 
+# Broker identities for the two subsystems that publish alongside the camera.
+# Separate users because the ACL is what stops the camera service inventing
+# thermostat readings, and that guarantee is only worth having if each side
+# has its own credentials.
+RATGDO_PW="$(openssl rand -base64 32 | tr -dc 'A-Za-z0-9' | head -c 28)"
+ZWAVE_PW="$(openssl rand -base64 32 | tr -dc 'A-Za-z0-9' | head -c 28)"
+env_add RATGDO_MQTT_USER ratgdo
+env_add RATGDO_MQTT_PASS "$RATGDO_PW"
+env_add ZWAVE_MQTT_USER zwave
+env_add ZWAVE_MQTT_PASS "$ZWAVE_PW"
+
+# Optional subsystems. Empty means "absent", and the matching panel simply
+# does not appear in the UI - so a fresh install is a working camera whether
+# or not the rest of the house is wired up yet.
+env_add RATGDO_HOST ""
+env_add RATGDO_PASS ""
+env_add CAM_BACKYARD_USER ""
+env_add CAM_BACKYARD_PASS ""
+env_add HVAC_NODE ""
+
 GENERATED_PW=""
 if ! env_has WEB_PASSWORD_HASH; then
     if [ -z "$WEB_PASSWORD" ]; then
@@ -268,6 +328,24 @@ else
     chown root:mosquitto /etc/mosquitto/passwd; chmod 640 /etc/mosquitto/passwd
     info "MQTT user 'camera' created."
 fi
+# The garage bridge and the Z-Wave gateway publish as themselves. Added with
+# -b and no -c: -c recreates the file, which would delete the camera user.
+for who in ratgdo zwave; do
+    var="$(echo "$who" | tr '[:lower:]' '[:upper:]')_MQTT_PASS"
+    if grep -q "^$who:" /etc/mosquitto/passwd 2>/dev/null; then
+        info "MQTT user '$who' exists; password left as-is."
+    elif [ "$DRY_RUN" -eq 1 ]; then
+        info "would create MQTT user '$who'"
+    else
+        pw="$(grep -E "^$var=" "$ENV_FILE" | head -1 | cut -d= -f2- | tr -d "\"'")"
+        if [ -n "$pw" ]; then
+            mosquitto_passwd -b /etc/mosquitto/passwd "$who" "$pw"
+            info "MQTT user '$who' created."
+        fi
+    fi
+done
+[ "$DRY_RUN" -eq 0 ] && { chown root:mosquitto /etc/mosquitto/passwd; chmod 640 /etc/mosquitto/passwd; }
+
 run systemctl enable --now mosquitto
 run systemctl restart mosquitto
 
@@ -301,12 +379,27 @@ else
     esac
 
     sleep 12
-    TODAY="$INSTALL_DIR/videos/$(date +%F).ts"
-    if [ -s "$TODAY" ]; then
-        info "Recording to $(basename "$TODAY") ($(stat -c%s "$TODAY") bytes so far)"
-    else
-        warn "No recording yet - check journalctl -u camera.service"
+    # Each camera records into videos/<cid>/. This used to look for
+    # videos/<date>.ts, the single-camera path, so it could only ever warn.
+    FOUND=0
+    for d in "$INSTALL_DIR"/videos/*/; do
+        [ -d "$d" ] || continue
+        cid="$(basename "$d")"
+        f="${d}$(date +%F).ts"
+        if [ -s "$f" ]; then
+            info "Recording $cid -> $(basename "$f") ($(stat -c%s "$f") bytes so far)"
+            FOUND=$((FOUND + 1))
+        else
+            warn "No recording yet for $cid - check journalctl -u camera.service"
+        fi
+    done
+    if [ "$FOUND" -eq 0 ]; then
+        warn "Nothing is recording yet. journalctl -u camera.service -n 50"
     fi
+
+    python3 "$INSTALL_DIR/deploy/verify-docs.py" >/dev/null 2>&1 \
+        && info "Documentation matches the code." \
+        || warn "deploy/verify-docs.py reports drift - run it to see what."
 fi
 
 # ---------------------------------------------------------------------------
@@ -328,6 +421,14 @@ cat <<EOF
 
 Your browser will warn about the self-signed certificate. Import
 ${TLS_DIR}/server.crt to silence it.
+
+Every setting lives in deploy/camera-service.env.example; the live copy is
+${ENV_FILE}.
+
+Optional subsystems are off until you fill in their settings there:
+  * garage door   RATGDO_HOST, RATGDO_PASS
+  * second camera CAM_BACKYARD_USER, CAM_BACKYARD_PASS
+  * thermostat    HVAC_NODE, after pairing it in zwave-js-ui
 
 Not done by this script, on purpose - see deploy/README.md:
   * firewall (ufw)          - can lock you out of a headless box
