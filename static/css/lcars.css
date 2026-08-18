@@ -42,6 +42,11 @@
 }
 
 html, body {
+  /* No pull-to-refresh and no rubber-band. A downward drift while holding a
+     control at the top of the rail reloaded the whole page: the feed restarts,
+     both folds snap shut, the tab resets, and a setpoint still inside its 2s
+     debounce is lost before it is ever sent. */
+  overscroll-behavior: none;
   height: 100%;
   margin: 0;
   background: var(--black);
@@ -156,6 +161,7 @@ a { color: var(--blue); }
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  overscroll-behavior-y: contain;   /* scrolling stops here, see html, body */
   display: flex;
   flex-direction: column;
   gap: var(--pad);
@@ -380,6 +386,7 @@ a { color: var(--blue); }
 #dpad, #dpad *,
 #tl, #tl *,
 #tl-ticks, #tl-ticks *,
+.video-frame img,
 .fold-head {
   -webkit-user-select: none;
   user-select: none;
@@ -404,6 +411,20 @@ a { color: var(--blue); }
   -webkit-tap-highlight-color: transparent;
   touch-action: manipulation;
 }
+
+/* A press-and-hold surface must own the gesture outright. touch-action:
+   manipulation only removes double-tap zoom - panning is still allowed, so
+   once a thumb drifted past the ~8px touch slop the compositor claimed the
+   gesture for the rail, fired pointercancel, and the zoom stopped mid-travel
+   while the panel scrolled out from under a finger that was still pressing.
+   preventDefault in beginHold cannot help: for touch, scrolling is governed
+   by touch-action, not by cancelling pointerdown. The pad has always had
+   this; the rockers are the same kind of control and were left on tap-only.
+
+   This has to sit AFTER the rule above, not before it: both selectors are a
+   single class, so specificity ties and source order decides. Placed first,
+   it computed as manipulation and changed nothing. */
+.hold-btn { touch-action: none; }
 
 .hold-btn.is-held, .pill:active, .chip:active {
   background: var(--orange);
@@ -928,3 +949,28 @@ a { color: var(--blue); }
    text colour. Stated rather than left to an undefined class, because a class
    that silently styles nothing is the bug this pair of rules exists to fix. */
 .state-fan { color: var(--text); }
+
+/* ------------------------------------------------------- phone, sideways -- */
+/* The frame's height follows from its width by aspect-ratio, so on a short
+   wide viewport it wants more height than the column layout has: at 812x375
+   the frame asked for 437px inside a 327px box and the rail below it was
+   handed a height of exactly zero. Every control was still in the document,
+   still the right size, and completely unreachable inside a clipped scroller.
+   Side by side is the honest layout for a short wide screen, and it is what
+   the >=1024px rule already does. */
+@media (max-width: 1023px) and (orientation: landscape) {
+  .app { flex-direction: row; }
+
+  .video-pane { flex: 1 1 auto; min-width: 0; min-height: 0; }
+
+  /* Drive the frame from the height it actually has, so the aspect ratio
+     decides the width instead of the other way round. */
+  .video-frame {
+    width: auto;
+    height: 100%;
+    max-width: 100%;
+    margin-inline: auto;
+  }
+
+  .rail { flex: 0 0 min(46%, 380px); }
+}

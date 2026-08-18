@@ -200,11 +200,15 @@
   };
 
   var holding = null;
+  var holdPointerId = null;
 
   function beginHold(btn, ev) {
     ev.preventDefault();
-    if (holding) return;
+    // One motion owner at a time. The head can only travel one way at once,
+    // and the keepalive has a single slot that a second holder would clobber.
+    if (holding || padActive) return;
     holding = btn;
+    holdPointerId = ev.pointerId;
     btn.classList.add("is-held");
     try { btn.setPointerCapture(ev.pointerId); } catch (e) {}
     var path = HOLD_ENDPOINTS[btn.dataset.hold];
@@ -213,10 +217,17 @@
     startKeepalive(send);
   }
 
-  function endHold() {
+  function endHold(ev) {
     if (!holding) return;
+    // Only the finger that started this may end it. A second finger landing
+    // anywhere used to reach the window failsafe and stop a hold it had
+    // nothing to do with. Called with no event - blur, page hidden - it is an
+    // unconditional stop.
+    if (ev && ev.pointerId != null && holdPointerId !== null
+        && ev.pointerId !== holdPointerId) return;
     holding.classList.remove("is-held");
     holding = null;
+    holdPointerId = null;
     stopKeepalive();
     postCmd("/stop");
   }
@@ -233,6 +244,8 @@
   var pad = $("dpad");
   var padActive = false;
   var padVec = null;                       // current {pan, tilt} or null
+  var padPointerId = null;                 // the finger that owns the pad
+  var padStopped = true;                   // is a stop already outstanding?
 
   function arrowEls(vec) {
     var out = [];
@@ -254,15 +267,21 @@
   }
 
   function sendMove(vec) {
+    padStopped = false;
     postCmd("/move", { pan: vec.pan, tilt: vec.tilt,
                        panSpeed: speed, tiltSpeed: speed });
   }
 
   function padStop() {
-    if (padVec !== null || padActive) {
+    // Once per entry into the dead zone, not once per pointermove. Resting a
+    // thumb on the centre STOP circle used to re-post /stop for every move
+    // event, which is hundreds of commands at a serial-attached receiver for
+    // one press, and the backlog delays whatever the user does next.
+    if (!padStopped) {
       padVec = null;
       stopKeepalive();
       postCmd("/stop");
+      padStopped = true;
     }
     paintPad(null, padActive);
   }
@@ -301,24 +320,40 @@
     paintPad(vec, false);
   }
 
-  function padRelease() {
-    if (!padActive) return;
+  function padRelease(ev) {
+    // Only the finger that owns the pad may release it - see endHold.
+    if (ev && ev.pointerId != null && padPointerId !== null
+        && ev.pointerId !== padPointerId) return;
+    // padVec is also set by the keyboard, which never sets padActive. Testing
+    // padActive alone meant a held arrow key survived blur, tab-switch and
+    // page-hide with the 4s keepalive re-issuing /move indefinitely: a camera
+    // still panning after the user has gone, and the receiver-side runaway
+    // timeout defeated by the very keepalive meant to be its partner.
+    if (!padActive && padVec === null) return;
     padActive = false;
+    padPointerId = null;
     padVec = null;
     stopKeepalive();
     postCmd("/stop");
+    padStopped = true;
     paintPad(null, false);
   }
 
   if (pad) {
     pad.addEventListener("pointerdown", function (ev) {
       ev.preventDefault();
+      if (padActive || holding) return;    // one motion owner at a time
       padActive = true;
+      padPointerId = ev.pointerId;
+      // A press always commands something, even landing in the dead zone:
+      // pressing STOP when this page believes nothing is moving must still
+      // send a stop, because something else may have started the motion.
+      padStopped = false;
       try { pad.setPointerCapture(ev.pointerId); } catch (e) {}
       padUpdate(ev);
     });
     pad.addEventListener("pointermove", function (ev) {
-      if (padActive) padUpdate(ev);
+      if (padActive && ev.pointerId === padPointerId) padUpdate(ev);
     });
     ["pointerup", "pointercancel", "lostpointercapture"].forEach(function (t) {
       pad.addEventListener(t, padRelease);
@@ -346,7 +381,10 @@
   }
 
   // Global failsafes: any release anywhere, or the page going away, stops.
-  window.addEventListener("pointerup", function () { endHold(); padRelease(); });
+  // A release ends the gesture that owns that pointer, wherever it happens...
+  window.addEventListener("pointerup", function (ev) { endHold(ev); padRelease(ev); });
+  window.addEventListener("pointercancel", function (ev) { endHold(ev); padRelease(ev); });
+  // ...but the page going away stops everything, whichever input started it.
   window.addEventListener("blur", function () { endHold(); padRelease(); });
   document.addEventListener("visibilitychange", function () {
     if (document.hidden) { endHold(); padRelease(); }
@@ -883,7 +921,14 @@
   function drawCursor() {
     var at = position();
     var cur = $("tl-cursor");
-    if (at === null) { cur.hidden = true; return; }
+    if (at === null) {
+      cur.hidden = true;
+      // Leaving the old pair in place makes the slider announce a time it no
+      // longer has, over a readout showing --:--:--.
+      timeline.removeAttribute("aria-valuenow");
+      timeline.removeAttribute("aria-valuetext");
+      return;
+    }
     cur.hidden = false;
     cur.style.left = (at / DAY_SECONDS * 100) + "%";
     timeline.setAttribute("aria-valuenow", Math.round(at));
@@ -915,6 +960,8 @@
         drawTimeline();
         drawMarkers();
         windowStart = null;
+        // The playhead belonged to the day that just went away.
+        drawCursor();
         player.removeAttribute("src");
         player.load();
         $("w-pos").textContent = "--:--:--";
