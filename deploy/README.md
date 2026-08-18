@@ -826,7 +826,7 @@ edit when this arrived.
 
 ```
 CAM_BACKYARD_USER=admin
-CAM_BACKYARD_PASS="((*Why))*452"      # quote anything a shell would parse
+CAM_BACKYARD_PASS="((*Example))*000"  # quote anything a shell would parse
 CAM_BACKYARD_RETENTION_DAYS=7
 CAMERAS=mic612,backyard               # optional: narrow what this host runs
 ```

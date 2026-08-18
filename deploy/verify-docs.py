@@ -84,6 +84,57 @@ for f in sorted((ROOT / "deploy").glob("*.sh")):
     check(r.returncode == 0, "%s parses%s" % (
         f.name, "" if r.returncode == 0 else " - " + r.stderr.strip()[:90]))
 
+print("\n== no credentials committed to the tree ==")
+# The camera's real password sat in deploy/README.md for 14 commits of a
+# public repository, because the paragraph explaining that shell
+# metacharacters must be quoted used the actual value as its example.
+#
+# Only a literal assignment counts. `MQTT_PASSWORD = _env("MQTT_PASSWORD", "")`
+# is the code READING a secret, which is exactly what it should do, and a
+# scanner that cannot tell the difference gets switched off within a week.
+ASSIGN = re.compile(
+    r"^\s*(?:export\s+)?([A-Z][A-Z0-9_]*"
+    r"(?:PASS|PASSWORD|PASSWD|SECRET|TOKEN|APIKEY|KEY))"
+    r"\s*[=:]\s*(.+?)\s*(?:#.*)?$")
+LITERAL = re.compile(r"""^(["']?)([^"']*)\1$""")
+INNOCENT = re.compile(
+    r"(^$|^<.*>$|/|\\|example|sample|placeholder|changeme|redacted|"
+    r"your[-_ ]?|xxx|\.\.\.|generated|set by |^\d+$)", re.I)
+SKIP_DIRS = {".git", "venv", "videos", "logs", "__pycache__", "static", "clips"}
+SKIP_SUFFIX = {".ttf", ".jpg", ".jpeg", ".png", ".ts", ".mp4", ".woff2"}
+
+leaks = []
+for f in sorted(ROOT.rglob("*")):
+    rel = f.relative_to(ROOT)
+    if not f.is_file() or any(part in SKIP_DIRS for part in rel.parts):
+        continue
+    if f.suffix.lower() in SKIP_SUFFIX:
+        continue
+    try:
+        text = f.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError):
+        continue
+    for n, line in enumerate(text.splitlines(), 1):
+        m = ASSIGN.match(line)
+        if not m:
+            continue
+        name, rhs = m.group(1), m.group(2).strip()
+        lit = LITERAL.match(rhs)
+        if not lit:
+            continue                      # an expression, not a literal secret
+        value = lit.group(2)
+        # A value containing an expansion is being computed, not embedded:
+        # DESEC_TOKEN="${TOKEN}" writes a secret to a root-only file, and
+        # CLIENT_KEY=$(wg genkey) mints one. Both are correct code.
+        if "$" in value or "`" in value or "%s" in value:
+            continue
+        if len(value) < 8 or INNOCENT.search(value):
+            continue
+        leaks.append("%s:%d %s" % (rel, n, name))
+
+check(not leaks, "no literal credentials in tracked files%s"
+      % ("" if not leaks else " - " + "; ".join(leaks)))
+
 print("\n== deploy files are either installed or explained ==")
 # A file nobody runs and nobody mentions is either dead or a forgotten step.
 readme = README.read_text(encoding="utf-8") if README.exists() else ""
