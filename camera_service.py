@@ -1822,7 +1822,17 @@ def move():
     {"pan": -1|0|1, "tilt": -1|0|1, "panSpeed": 1-63, "tiltSpeed": 1-63}
     Both axes zero is a stop.
     """
-    p = request.get_json(silent=True) or {}
+    # The eighteen action routes registered from HTTP_PTZ_ROUTES check this.
+    # These four did not, so POST /move?cam=backyard answered ok and moved the
+    # MIC 612 - and so did ?cam=nope, a camera that does not exist. The MQTT
+    # path checked all along, which is precisely the drift between the two
+    # command paths that the README claimed could not happen.
+    why = ptz_camera_or_error(_camera_arg())
+    if why:
+        return make_response(jsonify({"ok": False, "error": why}), 400)
+    p = request.get_json(silent=True)
+    if not isinstance(p, dict):
+        p = {}
     try:
         pan = int(p.get("pan", 0))
         tilt = int(p.get("tilt", 0))
@@ -1850,7 +1860,17 @@ def clear_preset():
 
 
 def _preset(action: str):
-    payload = request.get_json(silent=True) or {}
+    # Shared by /Set_preset, /Goto_preset and /Clear_preset - see move().
+    # Goto_preset is the one that physically repositions the camera, so an
+    # ungated version aimed at the wrong camera does not merely answer
+    # wrongly, it moves something.
+    why = ptz_camera_or_error(_camera_arg())
+    if why:
+        return make_response(jsonify({"ok": False, "preset": None,
+                                      "error": why}), 400)
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        payload = {}
     # "preset" is the current name; "flabber" is accepted for the old UI.
     raw = payload.get("preset", payload.get("flabber"))
     try:
@@ -2410,7 +2430,13 @@ def sweep_clips(max_age_seconds: float = 0.0) -> None:
 @app.route("/Start_New_File", methods=["POST"])
 def start_new_file():
     """Close today's file early and open a fresh one (kept as .partNN)."""
-    ok = recorder.roll()
+    # `recorder` is the module-level global bound to the primary camera, so
+    # this rolled the MIC's file whatever ?cam= said - the same class of bug
+    # as /move ignoring the camera entirely.
+    cam = _camera_arg()
+    if cam is None:
+        return _no_such_camera(request.args.get("cam", ""))
+    ok = cam.recorder.roll()
     return make_response(jsonify({"ok": ok}), 200)
 
 

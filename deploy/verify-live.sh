@@ -92,6 +92,32 @@ UCODE=$(curl -s --cacert /etc/camera-tls/server.crt --resolve "$HOST:5000:127.0.
 chk "$([ "$UCODE" = "401" ] && echo 1 || echo 0)" "/play refuses anonymous" "HTTP $UCODE"
 
 echo
+# Every route that can reach the serial port, aimed at the camera with no
+# motors and at an id that does not exist. /move and the preset routes used to
+# skip the check the other eighteen performed, so the HTTP and MQTT command
+# paths had drifted apart in silence.
+#
+# preset 33 on purpose: it is a reserved camera function that preset_allowed()
+# refuses, so even if the camera gate were missing again this test still
+# cannot move anything. Finding the hole with preset 5 moved a real camera.
+PTZ_BAD=""
+for route in stop pan_left pan_right tilt_up tilt_down zoom_tele zoom_wide \
+             focus_near focus_far iris_open iris_close OSD_menu Tour_1 Tour_2 \
+             Windshield_Wiper Wiper_Off move Set_preset Goto_preset Clear_preset; do
+  for who in backyard nope; do
+    BODY=$("${Q[@]}" -X POST -H 'content-type: application/json' \
+           -d '{"pan":0,"tilt":0,"preset":33}' "$BASE/$route?cam=$who" 2>/dev/null)
+    case "$BODY" in
+      *'"ok":false'*|*'"ok": false'*) : ;;
+      *) PTZ_BAD="$PTZ_BAD $route?cam=$who" ;;
+    esac
+  done
+done
+chk "$([ -z "$PTZ_BAD" ] && echo 1 || echo 0)" \
+    "PTZ routes refuse a motorless and an unknown camera" \
+    "${PTZ_BAD:-all 40 refused}"
+
+echo
 echo "  cache now: $(du -sh /opt/camera/logs/media-cache 2>/dev/null | cut -f1)"
 echo
 [ "$FAILS" = "0" ] && echo "LIVE PASS" || echo "LIVE FAILURES: $FAILS"

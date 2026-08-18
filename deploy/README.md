@@ -51,7 +51,7 @@ that is neither is a forgotten step, and `verify-docs.py` fails if one appears.
 | `install.sh` | - | the installer itself |
 | `camera.service` | yes | the systemd unit |
 | `zwave-js-ui.service` | no - see Z-Wave | unit for the Z-Wave gateway |
-| `mosquitto-local.conf` | yes | broker: localhost only, no anonymous |
+| `mosquitto-local.conf` | yes | broker on the LAN (`listener 1883 0.0.0.0`), no anonymous |
 | `mosquitto-aclfile` | yes | per-user topic permissions |
 | `60-io-scheduler.rules` | yes | BFQ, so the recorder's ionice means something |
 | `70-serial-adapters.rules` | yes | binds each USB serial adapter by serial number |
@@ -140,6 +140,10 @@ The three groups are what let the service reach `/dev/video0` (video),
 
 ```bash
 sudo git clone https://github.com/jakeend2/Camera.git /opt/camera
+# Ownership first. The clone leaves /opt/camera root:root, and `sudo -u pi`
+# cannot create venv/ inside a directory pi cannot write to - the venv step
+# fails with Permission denied if these two lines are the other way round.
+sudo chown -R pi:camera /opt/camera
 cd /opt/camera
 sudo -u pi python3 -m venv venv
 sudo -u pi venv/bin/pip install -r requirements.txt
@@ -307,7 +311,16 @@ To re-sync everything after an address change:
 
 ```bash
 sudo /opt/camera/deploy/setup-dnsmasq.sh        # rewrites host-record + interface
-sudo /opt/camera/deploy/setup-wireguard.sh      # rewrites the ufw route + masquerade
+sudo /opt/camera/deploy/setup-wireguard.sh <hostname>   # ufw route + masquerade
+
+`setup-wireguard.sh` takes the public hostname as an argument and prints usage
+if it is missing. `setup-dnsmasq.sh` refuses to run at all if something is
+already listening on port 53 - which on a box that has run it once is dnsmasq
+itself, so stop it first:
+
+```bash
+sudo systemctl stop dnsmasq && sudo /opt/camera/deploy/setup-dnsmasq.sh
+```
 sudo /opt/camera/deploy/make-cert.sh            # only if using the self-signed cert
 ```
 
@@ -682,7 +695,13 @@ sudo systemctl daemon-reload && sudo systemctl enable --now zwave-js-ui
 ```
 
 The unit runs as its own `zwave` user under the same hardening as
-camera.service, and ufw allows 8091 from the LAN and the VPN only.
+camera.service. Its admin UI on 8091 is **not** opened by ufw - the rule set
+is 22, 5000, 1883 and 5353 - so reach it from the Pi itself or over an SSH
+tunnel:
+
+```bash
+ssh -L 8091:127.0.0.1:8091 pi@192.168.1.77
+```
 
 ### Back this up
 
@@ -868,6 +887,9 @@ genuinely *is* the whole filename and `DAY_FILE_RE`, `day_of()` and the
 
 Every route takes `?cam=<id>`, defaulting to the primary. Omitting it means
 what it always meant, so bookmarks and existing MQTT automations keep working.
+The live *page* is the exception worth knowing: it remembers the last camera in
+`localStorage`, and that remembered id wins over the default on load - so a
+bookmark to `/` reopens whichever camera you last looked at, not the primary.
 Naming a camera that does not exist is refused with 404 and the list of real
 ones - falling back to a different camera is the failure this design exists to
 prevent, so the default applies only when nothing was named.
@@ -928,14 +950,16 @@ ffmpeg -hide_banner -loglevel warning
 The analog camera's preview is nearly free - its ffmpeg already decodes the
 capture, so a second output costs only the MJPEG encode. A network camera has
 no such spare decode, so its preview comes from the camera's own low-res
-substream in a separate process: measured at 20% of a core against 4% for the
+substream in a separate process: measured at 23% of a core at 15fps (18% at
+10) against 4% for the
 recording it must not disturb.
 
 That process runs only while somebody is watching, plus `PREVIEW_LINGER`
 seconds. The saving matters less for CPU than for the camera: every RTSP
-session is a resource on the device itself. Cold start to first frame is about
-6.5 seconds, which `/health` reports as `preview_running` so the page can say
-so instead of showing a dead frame.
+session is a resource on the device itself. Cold start to first frame is
+4.0-4.8 seconds, measured repeatedly - it is the substream's 4.0s keyframe
+interval, not ffmpeg being slow to start. `/health` reports `preview_running`
+so the page can say so instead of showing a dead frame.
 
 ### Switching cameras, and the four seconds nobody sees any more
 
@@ -1025,8 +1049,8 @@ view of an incident and it is simply gone.
 | | Measured | 7 days |
 |---|---|---|
 | mic612 | 28 GB/day | 198 GB |
-| backyard | 57 GB/day | 396 GB |
-| | | **594 GB** of ~820 GB free |
+| backyard | 51 GB/day | 357 GB |
+| | | **555 GB** of ~820 GB free |
 
 `enforce_free_space()` picks the oldest day across *all* cameras, so the
 emergency path cannot favour whichever is listed first, and
@@ -1147,8 +1171,10 @@ on the bench:
 
 1. One diagonal `/move` (e.g. up-right) -> then set `DIAGONALS_ENABLED=1`
    in /etc/camera-service.env to turn the D-pad from 4-way into 8-way.
-2. `goto preset 34` then `33` -> then enable the HOME and FLIP buttons in
-   templates/index.html (they ship disabled).
+2. `goto preset 34` then `33` -> then wire up the HOME and FLIP buttons in
+   templates/index.html. They ship `disabled` AND carry no `data-cmd`, so
+   removing the attribute alone yields two buttons that do nothing; they need
+   a handler in main.js as well.
 3. A single-direction hold longer than 20 s -> confirms whether the Pelco
    runaway-protect timeout exists here (the client already re-sends every
    4 s, harmless either way).
