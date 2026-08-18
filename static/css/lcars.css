@@ -889,3 +889,13 @@ a { color: var(--blue); }
 .sp-value.pending { color: var(--blue); }
 
 .setpoint-row .chip { min-width: 56px; font-size: 1.1rem; }
+
+/* An element the JS hides with [hidden] must actually go, even when its own
+   class sets display - the UA rule for [hidden] loses to any author display,
+   which is how a fixed camera still showed the PTZ imager segment. */
+[hidden] { display: none !important; }
+
+/* .bad is set by the JS on readouts that are stale, alarming or offline. It
+   had no rule for dd, so an hour-old temperature looked exactly like a live
+   one. This covers the climate, garage and system panels alike. */
+.bad { color: var(--red); }

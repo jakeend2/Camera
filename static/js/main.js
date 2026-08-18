@@ -91,15 +91,7 @@
     document.querySelectorAll("[data-needs=\"ptz\"]").forEach(function (el) {
       el.hidden = !info.ptz;
     });
-    // With the PTZ tabs gone there is only one pane left; show it.
-    if (!info.ptz) {
-      document.querySelectorAll(".tabpane").forEach(function (p) {
-        p.classList.toggle("active", p.dataset.pane === "sys");
-      });
-      document.querySelectorAll("#tabs button").forEach(function (b) {
-        b.classList.toggle("active", b.dataset.tab === "sys");
-      });
-    }
+
 
     var frame = $("video-frame");
     if (frame) {
@@ -539,7 +531,18 @@
    */
   var hvacPane = $("hvac-pane");
   var hvacState = null;
-  var pendingSp = { heat: null, cool: null };
+  var pendingSp = { heat: null, cool: null };   // typed, not sent yet
+  var sentSp = { heat: null, cool: null };      // sent, not confirmed yet
+
+  /* What the user should see for a setpoint, most recent intent first. The
+   * sent value has to outrank the reported one until a poll confirms it, or a
+   * tap landing between dispatch and confirmation rebuilds from the old
+   * number and quietly undoes the command just sent. */
+  function spBase(which, h) {
+    if (pendingSp[which] != null) return pendingSp[which];
+    if (sentSp[which] != null) return sentSp[which];
+    return h ? h["setpoint_" + which] : null;
+  }
   var spTimer = null;
 
   function paintHvac(h) {
@@ -552,22 +555,35 @@
       el.classList.toggle("bad", !!bad);
     }
     var off = !h.online;
+    // "not answering" and "nothing heard lately" are different faults and the
+    // page says which. Anything else presents an hour-old temperature exactly
+    // like a live one.
+    var link = h.alive === false ? "not responding"
+             : !h.fresh ? ("stale" + (h.age_s ? " " + Math.round(h.age_s / 60) + " min" : ""))
+             : h.alive === true ? "ok" : "no report";
+    put("h-link", link, off);
     put("h-temp", h.temperature_f == null ? "–" : h.temperature_f + " °F", off);
     put("h-hum", h.humidity == null ? "–" : h.humidity + " %");
     put("h-mode", h.mode_label || "–");
     put("h-op", h.operating_label || "–",
-        h.operating_label === "Heating" || h.operating_label === "Cooling");
+        !!h.running);
     put("h-fan", (h.fan_label || "–") + " / " + (h.fan_state_label || "–"));
-    put("h-batt", h.battery == null ? "–" : h.battery + " %", h.battery < 20);
+    put("h-batt", h.battery == null ? "–" : h.battery + " %", h.battery != null && h.battery < 20);
 
     // A pending edit wins over the reported value, or the display would snap
     // back to the old number between taps.
-    var heat = pendingSp.heat != null ? pendingSp.heat : h.setpoint_heat;
-    var cool = pendingSp.cool != null ? pendingSp.cool : h.setpoint_cool;
+    // A poll reporting the value we asked for retires the in-flight copy.
+    ["heat", "cool"].forEach(function (w) {
+      if (sentSp[w] != null && h["setpoint_" + w] === sentSp[w]) sentSp[w] = null;
+    });
+    var heat = spBase("heat", h);
+    var cool = spBase("cool", h);
     put("h-sp-heat", heat == null ? "–" : heat + "°");
     put("h-sp-cool", cool == null ? "–" : cool + "°");
-    $("h-sp-heat").classList.toggle("pending", pendingSp.heat != null);
-    $("h-sp-cool").classList.toggle("pending", pendingSp.cool != null);
+    $("h-sp-heat").classList.toggle(
+      "pending", pendingSp.heat != null || sentSp.heat != null);
+    $("h-sp-cool").classList.toggle(
+      "pending", pendingSp.cool != null || sentSp.cool != null);
 
     document.querySelectorAll("[data-hvac=\"mode\"]").forEach(function (b) {
       b.classList.toggle("active", String(h.mode) === b.dataset.value);
@@ -590,25 +606,38 @@
     ["heat", "cool"].forEach(function (which) {
       if (pendingSp[which] == null) return;
       var value = pendingSp[which];
+      pendingSp[which] = null;
+      sentSp[which] = value;           // still ours until a poll confirms it
       jobs.push(fetch("/hvac/" + which, {
         method: "POST",
         credentials: "include",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ value: value })
       }).then(function (r) { return r.json(); })
-        .then(function (j) {
-          flash(j.ok ? (which + " " + value + "°") : (j.error || "refused"), !j.ok);
+        .then(function (res) {
+          if (res.ok) {
+            flash(which + " " + value + "\u00B0" + (res.note ? " - " + res.note : ""));
+          } else {
+            sentSp[which] = null;      // it did not take; show the truth again
+            flash(res.error || "refused", true);
+            paintHvac(hvacState);
+          }
+        })
+        .catch(function () {
+          sentSp[which] = null;
+          flash("thermostat unreachable", true);
+          paintHvac(hvacState);
         }));
     });
-    pendingSp.heat = pendingSp.cool = null;
     if ($("h-pending")) $("h-pending").innerHTML = "&nbsp;";
-    Promise.all(jobs).then(function () { setTimeout(refreshHvac, 2500); });
+    // allSettled, so one failed setpoint cannot cancel the refresh that would
+    // have shown what the other one actually did.
+    Promise.allSettled(jobs).then(function () { setTimeout(refreshHvac, 2500); });
   }
 
   function nudgeSetpoint(which, delta) {
     if (!hvacState) return;
-    var base = pendingSp[which] != null ? pendingSp[which]
-             : hvacState["setpoint_" + which];
+    var base = spBase(which, hvacState);
     if (base == null) { flash("no setpoint reported yet", true); return; }
     var next = Math.round(base) + delta;
     var lo = hvacState.min_f || 45, hi = hvacState.max_f || 90;

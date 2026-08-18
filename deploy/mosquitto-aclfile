@@ -16,6 +16,13 @@ topic write garage/+/set
 topic read hvac/#
 topic write hvac/+/set
 
+# Commands to the Z-Wave gateway go through the gateway's own API topic,
+# which sits deeper than hvac/+/set. Granting that one shape rather than
+# hvac/# keeps the rule that matters: this service may ASK the gateway to
+# change a value, and can never publish device state claiming something it
+# did not see. Verified: a fake temperature published as `camera` is refused.
+topic write hvac/_CLIENTS/+/api/+/set
+
 # --- ratgdo garage controller (user created when the hardware arrives) ----
 user ratgdo
 topic readwrite garage/#

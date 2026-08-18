@@ -353,6 +353,10 @@ HVAC_ENABLED = bool(HVAC_NODE)
 # A typo must not be able to command something absurd in January.
 HVAC_MIN_F = _env_int("HVAC_MIN_F", 45)
 HVAC_MAX_F = _env_int("HVAC_MAX_F", 90)
+# How long a reading stays believable, and how long to wait for the gateway to
+# say whether it accepted a command before giving up on it.
+HVAC_STALE_AFTER = _env_int("HVAC_STALE_AFTER", 900)
+HVAC_WRITE_TIMEOUT = _env_int("HVAC_WRITE_TIMEOUT", 8)
 
 _FONT_CANDIDATES = (
     "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
@@ -1673,7 +1677,8 @@ def require_login():
     if current_user.is_authenticated:
         return None
     # Anything scripted gets a clean 401; a browser navigation gets the form.
-    scripted = request.path.startswith(("/timeline", "/play", "/clip"))
+    scripted = request.path.startswith(
+        ("/timeline", "/play", "/clip", "/hvac", "/garage"))
     if (request.method == "POST"
             or request.path in ("/camera", "/health", "/snapshot")
             or scripted):
@@ -2492,7 +2497,9 @@ def hvac_set(what: str):
     if not HVAC_ENABLED:
         return make_response(jsonify({"ok": False,
                                       "error": "no thermostat configured"}), 404)
-    payload = request.get_json(silent=True) or {}
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        payload = {}
     value = payload.get("value")
     if what in ("heat", "cool"):
         ok, err = hvac.set_setpoint(what, value)
@@ -2502,8 +2509,13 @@ def hvac_set(what: str):
         ok, err = hvac.set_fan(value)
     else:
         ok, err = False, f"unknown control '{what}'"
+    # On success err carries a note rather than an error - a command queued
+    # for a sleeping thermostat was accepted but has not been applied yet, and
+    # saying so is the difference between honest and merely cheerful.
     return make_response(jsonify({"ok": ok, "what": what, "value": value,
-                                  "error": err}), 200 if ok else 400)
+                                  "error": "" if ok else err,
+                                  "note": err if ok else ""}),
+                         200 if ok else 400)
 
 
 @app.route("/garage")
@@ -2526,7 +2538,9 @@ def garage_set(what: str):
     if not RATGDO_ENABLED:
         return make_response(jsonify({"ok": False,
                                       "error": "no garage configured"}), 404)
-    payload = request.get_json(silent=True) or {}
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        payload = {}
     value = str(payload.get("value", "")).strip()
     ok, err = ratgdo.apply(what, value)
     return make_response(jsonify({"ok": ok, "what": what, "value": value,
@@ -2834,8 +2848,27 @@ class Hvac:
     MODES = {0: "Off", 1: "Heat", 2: "Cool", 3: "Auto",
              11: "Eco heat", 12: "Eco cool"}
     WRITABLE_MODES = (0, 1, 2, 3)
+    # Thermostat Operating State (CC 0x42) in full. The short table this
+    # replaced was shifted from 4 onward, so a system reporting "pending cool"
+    # was labelled "aux heat" - the opposite season.
     OPERATING = {0: "Idle", 1: "Heating", 2: "Cooling", 3: "Fan only",
-                 4: "Vent", 5: "Aux heat", 6: "2nd stage heat"}
+                 4: "Pending heat", 5: "Pending cool", 6: "Vent",
+                 7: "Aux heat", 8: "2nd stage heat", 9: "2nd stage cool",
+                 10: "2nd stage aux heat", 11: "3rd stage aux heat"}
+    # Whether the system is actually moving heat or air. Decided here from the
+    # number rather than by string-matching a label in the browser.
+    RUNNING_STATES = (1, 2, 3, 7, 8, 9, 10, 11)
+    # zwave-js SetValueStatus. "success" in a gateway reply only means the API
+    # call was dispatched - a write the driver refused still comes back
+    # success:true. The status is the part that says what the radio did.
+    WRITE_STATUS = {0: "the thermostat does not support that",
+                    1: "queued until the thermostat next wakes",
+                    2: "the thermostat refused it",
+                    3: "no such endpoint on the thermostat",
+                    4: "the gateway has not implemented that",
+                    5: "the thermostat rejected that value",
+                    254: "", 255: ""}
+    ACCEPTED = (1, 254, 255)
     FAN_MODES = {0: "Auto", 1: "On", 2: "Auto high", 3: "High"}
     WRITABLE_FAN_MODES = (0, 1)
     FAN_STATES = {0: "Idle", 1: "Running", 2: "Running high"}
@@ -2846,6 +2879,11 @@ class Hvac:
         self._values: dict = {}
         self._seen_at: dict = {}
         self._client = None
+        # Liveness is kept apart from the readings on purpose - see ingest().
+        self._alive = None
+        # Writes awaiting the gateway's verdict, keyed by the args we sent,
+        # because that is exactly what the gateway echoes back.
+        self._pending: dict = {}
 
     # -- ingest -------------------------------------------------------------
     @property
@@ -2862,23 +2900,57 @@ class Hvac:
         return topic.startswith(f"{HVAC_PREFIX}/")
 
     def ingest(self, topic: str, payload: bytes) -> None:
-        if not topic.startswith(self.base + "/"):
-            return
-        leaf = topic[len(self.base) + 1:]
         try:
             body = json.loads(payload.decode("utf-8", "replace"))
         except Exception:
             return
+        if topic == f"{HVAC_PREFIX}/{HVAC_GATEWAY}/api/writeValue":
+            self._reply(body)
+            return
+        if not topic.startswith(self.base + "/"):
+            return
+        leaf = topic[len(self.base) + 1:]
         value = body.get("value") if isinstance(body, dict) else body
-        name = self.READS.get(leaf)
-        if name is None:
+        if self.READS.get(leaf) is None:
             if leaf == "status":
-                name, value = "alive", bool(value)
-            else:
-                return                      # configuration noise; ignore
+                # Liveness, not a reading, and it must never touch the
+                # freshness clock: a "this node is dead" notice arriving now
+                # is not evidence that the thermostat is talking to us.
+                with self._lock:
+                    self._alive = bool(value)
+            return                      # anything else is configuration noise
+        # Age the reading by when the *device* reported it, not when we
+        # received it. The broker replays every retained value on reconnect,
+        # so arrival time would make a week-old reading look brand new every
+        # time the service restarts.
+        when = None
+        if isinstance(body, dict) and isinstance(body.get("time"), (int, float)):
+            when = body["time"] / 1000.0
         with self._lock:
-            self._values[name] = value
-            self._seen_at[name] = time.time()
+            self._values[self.READS[leaf]] = value
+            self._seen_at[self.READS[leaf]] = when if when else time.time()
+
+    def _reply(self, body) -> None:
+        """Hand a gateway verdict to whichever write is waiting for it."""
+        if not isinstance(body, dict):
+            return
+        origin = body.get("origin")
+        if isinstance(origin, str):
+            try:
+                origin = json.loads(origin)
+            except Exception:
+                origin = None
+        args = origin.get("args") if isinstance(origin, dict) else body.get("args")
+        try:
+            key = json.dumps(args, sort_keys=True)
+        except Exception:
+            return
+        with self._lock:
+            slot = self._pending.get(key)
+            if slot is None:
+                return
+            slot[1] = body
+        slot[0].set()
 
     # -- present ------------------------------------------------------------
     @staticmethod
@@ -2890,14 +2962,30 @@ class Hvac:
         with self._lock:
             v = dict(self._values)
             newest = max(self._seen_at.values(), default=0)
+            alive = self._alive
         mode = v.get("mode")
         fan_mode = v.get("fan_mode")
+        op = v.get("operating_state")
+        age = time.time() - newest if newest else None
+        fresh = bool(v) and age is not None and age < HVAC_STALE_AFTER
+        # Three states, not two. "the gateway says this node is dead" and
+        # "nothing has arrived for a while" are different faults, and a node
+        # that has never reported liveness at all is a third - so alive stays
+        # None rather than being guessed at.
+        online = fresh and alive is not False
+        # In an eco mode the eco setpoints are the ones driving the furnace;
+        # the ordinary pair controls nothing. Show and edit the live ones.
+        eco = mode in (11, 12)
+        sp_heat = v.get("setpoint_heat_eco" if eco else "setpoint_heat")
+        sp_cool = v.get("setpoint_cool_eco" if eco else "setpoint_cool")
         # The sensor reports Celsius while the setpoints are Fahrenheit -
         # the thermostat's own doing. Everything is presented in F so the
         # page never shows two scales side by side.
         return {
-            "online": bool(v) and (time.time() - newest) < 900,
-            "alive": v.get("alive", bool(v)),
+            "online": online,
+            "fresh": fresh,
+            "alive": alive,
+            "age_s": round(age) if age is not None else None,
             "node": HVAC_NODE,
             "temperature_f": self._f(v.get("temperature_c")),
             "temperature_c": v.get("temperature_c"),
@@ -2905,14 +2993,16 @@ class Hvac:
             "battery": v.get("battery"),
             "mode": mode,
             "mode_label": self.MODES.get(mode, "?" if mode is None else str(mode)),
-            "operating_state": v.get("operating_state"),
-            "operating_label": self.OPERATING.get(v.get("operating_state"), "?"),
+            "operating_state": op,
+            "operating_label": self.OPERATING.get(op, "?"),
+            "running": op in self.RUNNING_STATES,
             "fan_mode": fan_mode,
             "fan_label": self.FAN_MODES.get(fan_mode, "?"),
             "fan_state": v.get("fan_state"),
             "fan_state_label": self.FAN_STATES.get(v.get("fan_state"), "?"),
-            "setpoint_heat": v.get("setpoint_heat"),
-            "setpoint_cool": v.get("setpoint_cool"),
+            "eco": eco,
+            "setpoint_heat": sp_heat,
+            "setpoint_cool": sp_cool,
             "min_f": HVAC_MIN_F,
             "max_f": HVAC_MAX_F,
         }
@@ -2920,6 +3010,15 @@ class Hvac:
     # -- command ------------------------------------------------------------
     def _write(self, command_class: int, prop: str, value,
                property_key=None) -> tuple[bool, str]:
+        """Ask the gateway to change a value, and wait to hear whether it did.
+
+        Returns (ok, message). When ok the message is a note worth showing - a
+        command queued for a sleeping thermostat is accepted but not yet
+        applied - and when not ok it is the reason. Publishing and returning
+        True was the original shape, and it reported a write the driver had
+        refused outright ("Node 2 does not support the Command Class Thermostat
+        Setpoint") to the page as done.
+        """
         if self._client is None:
             return False, "no broker connection"
         value_id = {"nodeId": int(HVAC_NODE.rsplit("_", 1)[-1]),
@@ -2927,25 +3026,59 @@ class Hvac:
                     "property": prop}
         if property_key is not None:
             value_id["propertyKey"] = property_key
+        args = [value_id, value]
+        key = json.dumps(args, sort_keys=True)
+        waiter = threading.Event()
+        with self._lock:
+            self._pending[key] = [waiter, None]
         try:
             self._client.publish(
                 f"{HVAC_PREFIX}/{HVAC_GATEWAY}/api/writeValue/set",
-                json.dumps({"args": [value_id, value]}), qos=1)
+                json.dumps({"args": args}), qos=1)
         except Exception as exc:
+            with self._lock:
+                self._pending.pop(key, None)
             return False, f"could not reach the gateway: {exc}"
-        log.info("HVAC: asked the gateway to set %s=%s", prop, value)
-        return True, ""
+        answered = waiter.wait(HVAC_WRITE_TIMEOUT)
+        with self._lock:
+            slot = self._pending.pop(key, None)
+        reply = slot[1] if slot else None
+        if not answered or reply is None:
+            log.warning("HVAC: no verdict for %s=%s within %ss",
+                        prop, value, HVAC_WRITE_TIMEOUT)
+            return False, "the gateway did not answer"
+        result = reply.get("result")
+        status = result.get("status") if isinstance(result, dict) else None
+        if status is None:
+            if reply.get("success"):
+                return True, ""
+            return False, str(reply.get("message") or "the gateway refused it")
+        if status in self.ACCEPTED:
+            log.info("HVAC: %s=%s accepted (status %s)", prop, value, status)
+            return True, self.WRITE_STATUS.get(status, "")
+        why = self.WRITE_STATUS.get(status, f"status {status}")
+        log.warning("HVAC: %s=%s REFUSED - %s", prop, value, why)
+        return False, why
 
     def set_setpoint(self, which: str, value) -> tuple[bool, str]:
-        key = self.SETPOINTS.get((which or "").strip().lower())
-        if key is None:
+        which = (which or "").strip().lower()
+        if which not in self.SETPOINTS:
             return False, "setpoint must be heat or cool"
         try:
-            wanted = round(float(value))
+            wanted = float(value)
         except (TypeError, ValueError):
             return False, f"{value!r} is not a temperature"
+        if wanted != wanted or wanted in (float("inf"), float("-inf")):
+            return False, f"{value!r} is not a temperature"
+        wanted = round(wanted)
         if not HVAC_MIN_F <= wanted <= HVAC_MAX_F:
             return False, f"setpoint must be {HVAC_MIN_F}-{HVAC_MAX_F} F"
+        # Write whichever setpoint the thermostat is acting on. Writing the
+        # ordinary one while it is in an eco mode would succeed and change
+        # nothing in the house, which is the worst kind of working.
+        with self._lock:
+            eco = self._values.get("mode") in (11, 12)
+        key = self.SETPOINTS[which] + (10 if eco else 0)
         return self._write(67, "setpoint", wanted, property_key=key)
 
     def set_mode(self, mode) -> tuple[bool, str]:

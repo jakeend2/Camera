@@ -143,21 +143,28 @@
         <div><dt>Running</dt><dd id="h-op">&ndash;</dd></div>
         <div><dt>Fan</dt><dd id="h-fan">&ndash;</dd></div>
         <div><dt>Battery</dt><dd id="h-batt">&ndash;</dd></div>
+        <div><dt>Link</dt><dd id="h-link">&ndash;</dd></div>
       </dl>
 
-      <div class="setpoint-row">
-        <span class="sp-label">HEAT</span>
-        <button class="chip" data-sp="heat" data-delta="-1">&minus;</button>
-        <span class="sp-value" id="h-sp-heat">&ndash;</span>
-        <button class="chip" data-sp="heat" data-delta="1">+</button>
+      <div class="setpoint-row" role="group" aria-label="Heat setpoint">
+        <span class="sp-label" aria-hidden="true">HEAT</span>
+        <button class="chip" data-sp="heat" data-delta="-1"
+                aria-label="Lower the heat setpoint">&minus;</button>
+        <span class="sp-value" id="h-sp-heat" aria-live="polite"
+              aria-label="Heat setpoint">&ndash;</span>
+        <button class="chip" data-sp="heat" data-delta="1"
+                aria-label="Raise the heat setpoint">+</button>
       </div>
-      <div class="setpoint-row">
-        <span class="sp-label">COOL</span>
-        <button class="chip" data-sp="cool" data-delta="-1">&minus;</button>
-        <span class="sp-value" id="h-sp-cool">&ndash;</span>
-        <button class="chip" data-sp="cool" data-delta="1">+</button>
+      <div class="setpoint-row" role="group" aria-label="Cool setpoint">
+        <span class="sp-label" aria-hidden="true">COOL</span>
+        <button class="chip" data-sp="cool" data-delta="-1"
+                aria-label="Lower the cool setpoint">&minus;</button>
+        <span class="sp-value" id="h-sp-cool" aria-live="polite"
+              aria-label="Cool setpoint">&ndash;</span>
+        <button class="chip" data-sp="cool" data-delta="1"
+                aria-label="Raise the cool setpoint">+</button>
       </div>
-      <p class="hint" id="h-pending">&nbsp;</p>
+      <p class="hint" id="h-pending" aria-live="polite">&nbsp;</p>
 
       <div class="chip-row">
         <button class="pill" data-hvac="mode" data-value="0">OFF</button>
