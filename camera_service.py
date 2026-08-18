@@ -1202,7 +1202,10 @@ def camera_configs() -> list[CameraConfig]:
             overlay_timestamp=False,  # firmware OSD; a filter would force a decode
             retention_days=_cam_env_int("backyard", "RETENTION_DAYS",
                                         RETENTION_DAYS),
-            # Measured: 5.35 Mbit/s, 2560x1920 at 25fps, GOP 2.0s.
+            # Measured after the camera was set to Clear 20 / Fluent 15:
+            # main 2560x1920 at 20fps, 5.07 Mbit/s, GOP 2.0s (so archive
+            # seeking is unaffected); substream 640x480 at 15fps, GOP 4.0s,
+            # which is exactly the cold-start wait a switch used to show.
             play_window_seconds=_cam_env_int("backyard",
                                              "PLAY_WINDOW_SECONDS", 60),
             aspect="4/3",           # 2560x1920 - not 16:9 like the MIC

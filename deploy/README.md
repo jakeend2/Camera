@@ -864,35 +864,53 @@ Trimming ffmpeg's startup does not help and was not shipped: `-probesize` and
 `-analyzeduration` changed nothing, and `-fflags nobuffer -flags low_delay`
 made it *worse* - 8s against 4s. The wait is the keyframe, not the probing.
 
-### The Backyard frame rate stops at the camera
+### The Backyard frame rate is a camera setting
 
-The substream is fixed at 640x480 and **10 fps**, both declared and measured
-by counting frames. `-vf fps=N` cannot invent frames that were never sent, so
-raising the number in this repo would only duplicate them.
+The preview can only pass on what the camera sends. `-vf fps=N` cannot invent
+frames, so the number here follows the camera rather than leading it - which
+is why it reads from the environment as `CAM_BACKYARD_PREVIEW_FPS`.
 
-Raising it for real is a change **on the camera**, and this camera's HTTP API
-is switched off - ports 80 and 443 are both closed, only 554 (RTSP), 8000 and
-9000 answer - so it cannot be done from here. It has to be done in the Reolink
-app: sub stream, frame rate. Then set `CAM_BACKYARD_PREVIEW_FPS` to match,
-which is why that value now reads from the environment.
+The camera's two streams are named **Clear** (main, recorded) and **Fluent**
+(sub, previewed) in its own settings. They are now Clear 20 / Fluent 15,
+measured on the wire afterwards rather than taken on trust:
 
-What it costs here, measured on this Pi:
+| | Before | Now |
+|---|---|---|
+| Fluent / sub, 640x480 | 10 fps | **15 fps**, GOP 4.0s |
+| Clear / main, 2560x1920 | 25 fps | **20 fps**, GOP 2.0s |
+| Main bitrate | 5.35 Mbit/s | **5.07 Mbit/s** -> 51 GB/day, 357 GB for 7 days |
+
+The main stream is recorded with `-c copy`, so **its GOP is the archive's seek
+granularity and its segment-cut boundary**. That is the number to check after
+any camera change, and it stayed at 2.0s.
+
+The substream's 4.0s GOP is worth knowing too: it is exactly the cold-start
+wait a camera switch used to display, because ffmpeg cannot emit a frame until
+the first keyframe arrives.
+
+Delivered end to end, sampled over 30s: **backyard 14.9 fps, mic612 20.0 fps**
+for 23% of a core.
+
+Twenty on the Backyard is not reachable from the substream, and the main
+stream is not the way to get it:
 
 | Preview source | CPU |
 |---|---|
-| substream -> mjpeg 10 fps (today) | 18% of a core |
-| substream -> mjpeg 15 fps | 25% |
+| substream -> mjpeg 10 fps | 18% of a core |
+| substream -> mjpeg 15 fps (today) | 23-25% |
 | substream -> mjpeg 20 fps | 32% |
 | **main** stream 2560x1920 -> scale 640 -> mjpeg 20 fps | **187%** |
 
-The main stream is the only route to 20 fps without touching the camera, and
 187% of a core is not available on a box already running an encode and two
-recordings. `h264_v4l2m2m` is in this ffmpeg build but its device node is not
-present, so hardware decode is not an option either. If the Backyard preview
-ever needs to match the MIC's 20 fps, that is a hardware conversation, not a
-configuration one.
+recordings, and `h264_v4l2m2m` is in this ffmpeg build but its device node is
+absent, so hardware decode is not an option either. Matching the MIC exactly
+would be a hardware conversation, not a configuration one.
 
-### Retention
+Note also that the camera's HTTP API is switched off - 80 and 443 both refuse,
+only 554, 8000 and 9000 answer - so none of this can be changed from the Pi.
+It is done in the Reolink app, and this repo follows.
+
+### Retention### Retention
 
 Per camera, and deliberately equal here. A day that has one angle but not the
 other is worse than a shorter archive, because you go looking for the second
