@@ -303,10 +303,10 @@ fi
 say "TLS certificate"
 # ---------------------------------------------------------------------------
 if [ -f "$TLS_DIR/server.crt" ]; then
-    info "Certificate exists; leaving it. Regenerate with deploy/make-cert.sh"
+    info "Certificate exists; leaving it. Regenerate with deploy/rotate-secret.sh tls"
     info "if this machine's address has changed."
 else
-    run "$INSTALL_DIR/deploy/make-cert.sh" "$LAN_IP"
+    run "$INSTALL_DIR/deploy/rotate-secret.sh" tls "$LAN_IP"
 fi
 [ "$DRY_RUN" -eq 0 ] && [ -f "$TLS_DIR/server.key" ] && \
     { chown root:"$SERVICE_USER" "$TLS_DIR/server.key"; chmod 640 "$TLS_DIR/server.key"; }
@@ -403,9 +403,9 @@ else
         warn "Nothing is recording yet. journalctl -u camera.service -n 50"
     fi
 
-    python3 "$INSTALL_DIR/deploy/verify-docs.py" >/dev/null 2>&1 \
+    python3 "$INSTALL_DIR/deploy/checks/docs.py" >/dev/null 2>&1 \
         && info "Documentation matches the code." \
-        || warn "deploy/verify-docs.py reports drift - run it to see what."
+        || warn "deploy/checks/docs.py reports drift - run it to see what."
 fi
 
 # ---------------------------------------------------------------------------
@@ -421,7 +421,7 @@ EOF
   Password  ${GENERATED_PW}
 
   ^ generated, shown once. Change it with:
-      sudo ${INSTALL_DIR}/deploy/set-web-password.sh
+      sudo ${INSTALL_DIR}/deploy/rotate-secret.sh web
 EOF
 cat <<EOF
 

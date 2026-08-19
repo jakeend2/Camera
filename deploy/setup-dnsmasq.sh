@@ -146,7 +146,7 @@ dnsmasq is answering on ${LAN_IP}:53.
 To use it, point clients at this Pi for DNS:
 
   WireGuard clients   already handled - new configs from
-                      wireguard-add-client.sh carry DNS = 10.8.0.1.
+                      setup-wireguard.sh add-client carry DNS = 10.8.0.1.
                       Existing clients need that line added, or
                       re-issue them.
 

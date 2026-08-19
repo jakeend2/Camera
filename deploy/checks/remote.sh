@@ -3,7 +3,7 @@
 # link is broken. Getting in from outside is eight things in a row, and every
 # one of them fails the same way from the sofa: "it doesn't load".
 #
-#   sudo deploy/verify-remote.sh [vpn-endpoint-host]
+#   sudo deploy/checks/remote.sh [vpn-endpoint-host]    (or: sudo deploy/health.sh remote)
 #
 # Read-only: it queries, it never reconfigures. The deSEC token is not printed,
 # only whether it still works.
@@ -65,7 +65,7 @@ if [ "${1:-}" = "--watch" ]; then
     elif [ "${RX1:-0}" != "${RX0:-0}" ]; then
         echo "PACKETS ARRIVED but no handshake completed."
         echo "The network path is fine; the phone's key or config does not match"
-        echo "this server. Re-issue it: sudo deploy/wireguard-add-client.sh <name>"
+        echo "this server. Re-issue it: sudo deploy/setup-wireguard.sh add-client <name>"
     else
         echo "NOTHING ARRIVED on 51820."
         echo "If you really did toggle the tunnel, the packets are being stopped"

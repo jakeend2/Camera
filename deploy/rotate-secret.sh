@@ -8,6 +8,8 @@
 #   mqtt-ratgdo   broker password for the 'ratgdo' user  (the garage bridge)
 #   mqtt-zwave    broker password for the 'zwave' user   (zwave-js-ui)
 #   flask         the session signing key - logs everyone out
+#   web           the web UI password (prompts, stores only the hash)
+#   tls           self-signed TLS key + certificate   [tls <lan-ip>]
 #
 #   set <NAME>    prompt for a value you set elsewhere - on the camera, on
 #                 the ratgdo - and store it here without echoing it. Use this
@@ -21,16 +23,24 @@
 # connection and the client retries forever. That is the whole reason this
 # script exists rather than a line in the documentation.
 #
-# The web login is not here: deploy/set-web-password.sh already does it.
-# Nor is anything held by a device or a third party - those cannot be rotated
-# from this machine at all, and the README says where each one lives.
+# Credentials held by a device (the camera's own admin account, the ratgdo's
+# UI) cannot be rotated from this machine at all - change them on the device,
+# then record the new value here with `set`.
 set -euo pipefail
 
 ENV_FILE=/etc/camera-service.env
 ZW_SETTINGS=/var/lib/zwave-js-ui/store/settings.json
-WHAT="${1:-}"
+# --dry-run is honoured wherever it appears. Testing only $2 broke the
+# moment a mode grew a positional argument: `tls <ip> --dry-run` silently
+# performed a REAL key rotation, which is the exact opposite of what the
+# flag promises.
 DRY=0
-[ "${2:-}" = "--dry-run" ] && DRY=1
+ARGS=()
+for a in "$@"; do
+    if [ "$a" = "--dry-run" ]; then DRY=1; else ARGS+=("$a"); fi
+done
+set -- ${ARGS[@]+"${ARGS[@]}"}
+WHAT="${1:-}"
 
 say()  { printf '\n== %s ==\n' "$*"; }
 info() { printf '   %s\n' "$*"; }
@@ -40,8 +50,8 @@ run()  { if [ "$DRY" -eq 1 ]; then printf '   would: %s\n' "$*"; else "$@"; fi; 
 
 # Usage first, so asking what this does does not require root.
 case "$WHAT" in
-    mqtt-camera|mqtt-ratgdo|mqtt-zwave|flask|set) : ;;
-    *) sed -n '2,26p' "$0"; exit 1 ;;
+    mqtt-camera|mqtt-ratgdo|mqtt-zwave|flask|set|web|tls) : ;;
+    *) awk 'NR > 1 { if (!/^#/) exit; print }' "$0"; exit 1 ;;
 esac
 [ "$(id -u)" -eq 0 ] || die "Run with sudo."
 [ "$DRY" -eq 1 ] && echo "DRY RUN - nothing will be changed."
@@ -74,12 +84,101 @@ else:
 with open(path, "w") as f:
     f.write(text)
 PY
+    # The old standalone scripts re-asserted these on every write, healing
+    # any drift; keep that. Group camera matches install.sh (pi is in it).
+    local grp=camera
+    getent group "$grp" >/dev/null || grp=pi
+    chown "root:$grp" "$ENV_FILE"
+    chmod 640 "$ENV_FILE"
     info "$key updated in $ENV_FILE"
 }
 
 env_get() {
     sed -n "s/^$1=//p" "$ENV_FILE" | head -1 | sed 's/^"//; s/"$//; s/^'"'"'//; s/'"'"'$//'
 }
+
+if [ "$WHAT" = "web" ]; then
+    say "Web UI password"
+    printf '   New password (not echoed): '
+    read -rs P1; echo
+    printf '   Again: '
+    read -rs P2; echo
+    if [ "$P1" != "$P2" ]; then die "They do not match - nothing changed."; fi
+    if [ ${#P1} -lt 12 ]; then die "Use at least 12 characters."; fi
+    HASH=$(P="$P1" /opt/camera/venv/bin/python -c \
+        'import os; from werkzeug.security import generate_password_hash; print(generate_password_hash(os.environ["P"]))')
+    unset P1 P2
+    env_set WEB_PASSWORD_HASH "$HASH"
+    run rm -f /etc/camera-web-initial-password
+    run systemctl restart camera.service
+    info "Password updated. Existing sessions stay signed in - rotate 'flask'"
+    info "as well to sign everyone out."
+    exit 0
+fi
+
+if [ "$WHAT" = "tls" ]; then
+    IP="${2:-$(hostname -I | awk '{print $1}')}"
+    DIR=/etc/camera-tls
+    say "TLS key and certificate for $IP"
+    # setup-letsencrypt.sh may have installed a CA-issued certificate over the
+    # self-signed one. Regenerating self-signed here would silently downgrade
+    # it - renewal belongs to certbot's timer, not to this script.
+    if [ -f "$DIR/server.crt" ]; then
+        SUBJ=$(openssl x509 -in "$DIR/server.crt" -noout -subject 2>/dev/null | sed 's/^subject=//')
+        ISS=$(openssl x509 -in "$DIR/server.crt" -noout -issuer 2>/dev/null | sed 's/^issuer=//')
+        if [ -n "$ISS" ] && [ "$SUBJ" != "$ISS" ]; then
+            die "the installed certificate is CA-issued ($ISS).
+Replacing it with a self-signed one is a downgrade. certbot renews it on its
+own timer; if self-signed is really wanted, remove $DIR/server.crt first."
+        fi
+    fi
+    CNF=$(mktemp)
+    cat > "$CNF" <<EOF
+[req]
+distinguished_name = dn
+x509_extensions = v3
+prompt = no
+[dn]
+CN = $(hostname)
+O = Camera Service
+[v3]
+basicConstraints = critical, CA:TRUE
+keyUsage = critical, digitalSignature, keyEncipherment, keyCertSign
+extendedKeyUsage = serverAuth
+subjectAltName = @alt
+[alt]
+DNS.1 = $(hostname)
+DNS.2 = $(hostname).local
+DNS.3 = localhost
+IP.1  = ${IP}
+IP.2  = 127.0.0.1
+EOF
+    run mkdir -p "$DIR"
+    run openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+        -keyout "$DIR/server.key" -out "$DIR/server.crt" -config "$CNF"
+    rm -f "$CNF"
+    # The service reads the key as User=camera; root:pi only ever worked
+    # because install.sh re-chowned it afterwards.
+    SVC_GROUP=camera
+    getent group "$SVC_GROUP" >/dev/null || SVC_GROUP=pi
+    run chown "root:$SVC_GROUP" "$DIR/server.key" "$DIR/server.crt"
+    run chmod 640 "$DIR/server.key"
+    run chmod 644 "$DIR/server.crt"
+    if [ "$DRY" -eq 0 ]; then
+        openssl x509 -in "$DIR/server.crt" -noout -subject -dates -ext subjectAltName
+    fi
+    # try-restart no-ops for a unit that exists but is stopped - but it FAILS
+    # for a unit that does not exist at all, and during a fresh install this
+    # runs before install.sh has installed the unit. Unguarded, that one exit
+    # code aborted the entire fresh install under set -e.
+    if systemctl cat camera.service >/dev/null 2>&1; then
+        run systemctl try-restart camera.service
+    else
+        info "camera.service not installed yet - nothing to restart"
+    fi
+    info "Done."
+    exit 0
+fi
 
 if [ "$WHAT" = "set" ]; then
     KEY="${2:-}"
@@ -88,7 +187,7 @@ if [ "$WHAT" = "set" ]; then
         CAM_BACKYARD_PASS|RATGDO_PASS|CAM_BACKYARD_USER|RATGDO_USER) : ;;
         *) die "Refusing to set '$KEY' this way. This mode is for credentials
 that live on a device: CAM_BACKYARD_PASS, RATGDO_PASS and their usernames.
-The generated ones have their own modes; the web login has set-web-password.sh." ;;
+The generated ones have their own modes; the web login is: sudo $0 web." ;;
     esac
     say "$KEY"
     printf '   New value (not echoed): '
@@ -170,7 +269,13 @@ PY
     fi
 fi
 
-run mosquitto_passwd -b /etc/mosquitto/passwd "$USER" "$NEW"
+# Not through run(): its dry-run echo would print the candidate password,
+# and a rotation tool has no business printing secrets in any mode.
+if [ "$DRY" -eq 1 ]; then
+    info "would set the broker password for '$USER' (value not shown)"
+else
+    mosquitto_passwd -b /etc/mosquitto/passwd "$USER" "$NEW"
+fi
 run chown root:mosquitto /etc/mosquitto/passwd
 run chmod 640 /etc/mosquitto/passwd
 run systemctl reload mosquitto

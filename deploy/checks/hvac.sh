@@ -1,30 +1,14 @@
 #!/bin/bash
 # Verify the thermostat panel through the RUNNING service, the same way
-# verify-live.sh does the archive: real systemd sandbox, real cheroot, real
+# checks/live.sh does the archive: real systemd sandbox, real cheroot, real
 # TLS, real session cookie. Written after a write that the Z-Wave driver had
 # refused outright was reported to the page as applied - the service published
 # a command and returned success without ever reading the gateway's verdict.
-cd /opt/camera || exit 1
+. "$(dirname "$0")/lib.sh"
 
 UA="hvac-verify/1.0"
-set -a; . /etc/camera-service.env; set +a
-COOKIE=$(timeout 60 venv/bin/python - "$UA" <<'PY' 2>/dev/null
-import sys
-sys.path.insert(0, "/opt/camera")
-import camera_service as cs
-from flask_login.utils import _create_identifier
-with cs.app.test_request_context(
-        "/", environ_base={"REMOTE_ADDR": "127.0.0.1",
-                           "HTTP_USER_AGENT": sys.argv[1]}):
-    ident = _create_identifier()
-print(cs.app.session_interface.get_signing_serializer(cs.app).dumps(
-    {"_user_id": cs.WEB_USERNAME, "_fresh": True, "_id": ident}))
-PY
-)
+COOKIE=$(mint_cookie "$UA")
 [ -z "$COOKIE" ] && { echo "  could not mint a session cookie"; exit 1; }
-
-HOST=camera.jakeend2.dedyn.io
-BASE="https://$HOST:5000"
 Q=(curl -s --cacert /etc/camera-tls/server.crt --resolve "$HOST:5000:127.0.0.1"
    -A "$UA" -b "session=$COOKIE")
 
@@ -33,9 +17,9 @@ ok()  { echo "  OK   $1"; }
 bad() { echo "  FAIL $1"; FAILS=$((FAILS+1)); }
 
 post() {  # post <path> <body> -> "<code> <body>"
-  "${Q[@]}" -o /tmp/hv.json -w '%{http_code}' -X POST \
+  "${Q[@]}" -o $SCRATCH/hv.json -w '%{http_code}' -X POST \
     -H 'content-type: application/json' -d "$2" "$BASE/$1"
-  echo " $(cat /tmp/hv.json)"
+  echo " $(cat $SCRATCH/hv.json)"
 }
 
 echo "== reading =="
@@ -179,13 +163,13 @@ if [ -z "$SP" ]; then
   SP=72
 fi
 CODE=$(post "hvac/cool" "{\"value\": $SP}" | cut -d' ' -f1)
-echo "  -> $CODE $(cat /tmp/hv.json)"
+echo "  -> $CODE $(cat $SCRATCH/hv.json)"
 # Whether the radio accepts or refuses depends on the thermostat, so both are
 # a pass. What must never happen again is ok:true with nothing behind it.
-venv/bin/python - "$CODE" <<'PY'
+venv/bin/python - "$CODE" "$SCRATCH/hv.json" <<'PY'
 import json, sys
 code = sys.argv[1]
-r = json.load(open("/tmp/hv.json"))
+r = json.load(open(sys.argv[2]))
 if r.get("ok"):
     assert code == "200", "ok:true with status " + code
     print("  accepted" + (" - " + r["note"] if r.get("note") else ""))
@@ -213,9 +197,9 @@ R=$(post "hvac/mode" '{"value": 7}');     echo "  bad mode:  $R"
 echo
 echo "== no session =="
 U=$(curl -s --cacert /etc/camera-tls/server.crt --resolve "$HOST:5000:127.0.0.1" \
-    -o /tmp/hv_un.json -w '%{http_code}' "$BASE/hvac")
-echo "  -> $U $(head -c 90 /tmp/hv_un.json)"
-{ [ "$U" = "401" ] && grep -q '"ok": *false' /tmp/hv_un.json; } \
+    -o $SCRATCH/hv_un.json -w '%{http_code}' "$BASE/hvac")
+echo "  -> $U $(head -c 90 $SCRATCH/hv_un.json)"
+{ [ "$U" = "401" ] && grep -q '"ok": *false' $SCRATCH/hv_un.json; } \
   && ok "401 JSON rather than a login redirect" \
   || bad "unauthenticated /hvac did not answer 401 JSON"
 

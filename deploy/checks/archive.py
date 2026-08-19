@@ -27,6 +27,14 @@ if _env_file.exists():
             os.environ.setdefault(_k.strip(), _v)
 
 sys.path.insert(0, "/opt/camera")
+
+# Private scratch: fixed /tmp names collide across users - fs.protected_regular
+# refuses to reopen another user's file in sticky /tmp, even as root, so a
+# check run as pi and later as root (health.sh) read or wrote stale files.
+import tempfile
+_SCRATCH = Path(tempfile.mkdtemp(prefix="verify-archive."))
+import atexit, shutil
+atexit.register(lambda: shutil.rmtree(_SCRATCH, ignore_errors=True))
 import camera_service as cs
 
 cs.AUTH_ENABLED = False
@@ -143,7 +151,7 @@ check("/clip content-length matches", int(r.headers["Content-Length"]) == len(da
 check("/clip names the file",
       "attachment" in r.headers.get("Content-Disposition", "")
       and ".mp4" in r.headers.get("Content-Disposition", ""))
-Path("/tmp/verify_clip.mp4").write_bytes(data)
+(_SCRATCH / "verify_clip.mp4").write_bytes(data)
 
 check("/clip rejects empty range",
       c.get(f"/clip?day={day.isoformat()}&from=100&to=100").status_code == 400)
@@ -169,7 +177,7 @@ for i in range(len(segs) - 1):
         check("spanning clip reports missing time",
               "X-Missing-Seconds" in r.headers,
               f"missing={r.headers.get('X-Missing-Seconds')}s")
-        Path("/tmp/verify_span.mp4").write_bytes(span)
+        (_SCRATCH / "verify_span.mp4").write_bytes(span)
         span_ok = True
         break
 if not span_ok:
@@ -193,7 +201,7 @@ check("archive page links to the player", b"WATCH" in r.data)
 # Record what the clip actually starts at, for the visual check.
 meta = {"clip_from_seconds": clip_from,
         "clip_expect": time.strftime("%H:%M:%S", time.localtime(midnight + clip_from))}
-Path("/tmp/verify_meta.json").write_text(json.dumps(meta))
+(_SCRATCH / "verify_meta.json").write_text(json.dumps(meta))
 print("\n  clip requested at " + meta["clip_expect"])
 print("\n" + ("PASS" if not fails else f"FAILURES: {fails}"))
 sys.exit(1 if fails else 0)

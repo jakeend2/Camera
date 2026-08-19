@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Verify the multi-camera HTTP surface.
 
-Runs against the module in-process. Complements deploy/verify-archive.py
+Runs against the module in-process. Complements deploy/checks/archive.py
 (which exercises one camera end to end) by checking the things that only
 matter once there is more than one: that omitting ?cam still means the
 primary camera, that naming an unknown one is refused rather than silently

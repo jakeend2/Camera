@@ -43,7 +43,7 @@ The project lives in `/opt`, not a home directory, because `/home/pi` is mode
 ## What is in this directory
 
 Every file, and whether `install.sh` places it or you run it yourself. A file
-that is neither is a forgotten step, and `verify-docs.py` fails if one appears.
+that is neither is a forgotten step, and `checks/docs.py` fails if one appears.
 
 | File | Placed by install.sh | What it is |
 |---|---|---|
@@ -55,8 +55,6 @@ that is neither is a forgotten step, and `verify-docs.py` fails if one appears.
 | `mosquitto-aclfile` | yes | per-user topic permissions |
 | `60-io-scheduler.rules` | yes | BFQ, so the recorder's ionice means something |
 | `70-serial-adapters.rules` | yes | binds each USB serial adapter by serial number |
-| `make-cert.sh` | run by install.sh | self-signed TLS for the LAN address |
-| `set-web-password.sh` | you | change the web password |
 | `sudoers-pi` | no - deliberate | sudo hardening, applied by hand |
 | `apt-20auto-upgrades.conf` | no - deliberate | unattended-upgrades scheduling |
 | `unattended-upgrades-camera.conf` | no - deliberate | security updates only, no reboots |
@@ -64,27 +62,21 @@ that is neither is a forgotten step, and `verify-docs.py` fails if one appears.
 | `setup-letsencrypt.sh` | you | a real certificate instead of the self-signed one |
 | `setup-desec-ddns.sh` | you | dynamic DNS registration |
 | `desec-ddns-update.sh` | by setup-desec-ddns.sh | the periodic update itself |
-| `setup-wireguard.sh` | you | the VPN, needs router access |
-| `wireguard-add-client.sh` | you | add a device to the VPN |
-| `wifi-stabilise.sh` | you | only for the old wireless setup; the Pi is wired now |
-| `verify-archive.py` | you | archive indexing and clip extraction |
-| `verify-multicam.py` | you | per-camera isolation |
-| `verify-live.sh` | you | the archive through the running service, in its sandbox |
-| `verify-hvac.sh` | you | the thermostat, live and by injected payloads |
-| `verify-docs.py` | run by install.sh | fails when the docs drift from the code |
-| `rotate-secret.sh` | you | change a generated secret everywhere it lives |
-| `verify-remote.sh` | you | walk the chain that lets you in from outside |
+| `setup-wireguard.sh` | you | the VPN; `add-client <name>` issues a device config |
+| `health.sh` | you | one command: is everything working (`--full` adds the deep suites) |
+| `checks/` | health.sh's parts | docs, live, hvac, remote, archive, multicam - each runs alone too |
+| `rotate-secret.sh` | you | change any credential: broker passwords, session key, web login, TLS, device values |
 
-Run all of them before trusting a change:
+Run the lot before trusting a change:
 
 ```bash
-cd /opt/camera
-python3 deploy/verify-docs.py
-venv/bin/python deploy/verify-archive.py
-venv/bin/python deploy/verify-multicam.py
-bash deploy/verify-live.sh
-bash deploy/verify-hvac.sh
+sudo deploy/health.sh --full     # ~10 min; without --full the deep archive
+                                 # suites are skipped and it takes ~2
 ```
+
+Each part still runs alone - `deploy/health.sh hvac`, or directly as
+`bash deploy/checks/hvac.sh` - which is what you want when iterating on one
+subsystem rather than trusting a release.
 
 ---
 
@@ -184,13 +176,13 @@ openssl rand -hex 32                                    # FLASK_SECRET_KEY
 
 Quote the hash in the env file — it contains `$` characters.
 
-Change the web password later with **`set-web-password.sh`**, which prompts
+Change the web password later with **`rotate-secret.sh web`**, which prompts
 without echo, writes only the hash, and restarts the service.
 
 ### 4. TLS certificate
 
 ```bash
-sudo /opt/camera/deploy/make-cert.sh            # or: make-cert.sh 192.168.1.77
+sudo /opt/camera/deploy/rotate-secret.sh tls    # or: ... tls 192.168.1.77
 ```
 
 Writes a self-signed cert to `/etc/camera-tls/` with the Pi's hostnames and
@@ -322,7 +314,7 @@ itself, so stop it first:
 ```bash
 sudo systemctl stop dnsmasq && sudo /opt/camera/deploy/setup-dnsmasq.sh
 ```
-sudo /opt/camera/deploy/make-cert.sh            # only if using the self-signed cert
+sudo /opt/camera/deploy/rotate-secret.sh tls    # only if using the self-signed cert
 ```
 
 Then update the `camera` A record in the deSEC zone by hand, and re-do the
@@ -385,7 +377,7 @@ one-shot generators, so config written while the Pi was on `wlan0` kept naming
 Then add a device:
 
 ```bash
-sudo /opt/camera/deploy/wireguard-add-client.sh phone
+sudo /opt/camera/deploy/setup-wireguard.sh add-client phone
 ```
 
 Prints the config and a QR code. Scan it with the official WireGuard app.
@@ -470,11 +462,12 @@ sudo tar czf ~/camera-config-backup-$(date +%F).tar.gz \
 ## Getting in from outside, and the two names that are not the same
 
 Reaching the UI from mobile data is eight things in a row, and all eight fail
-identically from the sofa. `deploy/verify-remote.sh` walks them and names the
+identically from the sofa. `deploy/checks/remote.sh` walks them and names the
 first broken link:
 
 ```bash
-sudo deploy/verify-remote.sh
+sudo deploy/health.sh remote          # or --watch to sit on udp/51820 while
+                                      # you toggle a client on and off
 ```
 
 Before reading its output, know that **two hostnames do different jobs**, and
@@ -516,12 +509,12 @@ for ever. `rotate-secret.sh` exists for exactly those.
 
 | Secret | Command |
 |---|---|
-| Web UI login | `sudo deploy/set-web-password.sh` |
+| Web UI login | `sudo deploy/rotate-secret.sh web` |
 | MQTT `camera` | `sudo deploy/rotate-secret.sh mqtt-camera` |
 | MQTT `ratgdo` | `sudo deploy/rotate-secret.sh mqtt-ratgdo` |
 | MQTT `zwave` | `sudo deploy/rotate-secret.sh mqtt-zwave` |
 | Session signing key | `sudo deploy/rotate-secret.sh flask` |
-| TLS key + certificate | `sudo deploy/make-cert.sh <lan-ip>` |
+| TLS key + certificate | `sudo deploy/rotate-secret.sh tls <lan-ip>` |
 | A value set on a device | `sudo deploy/rotate-secret.sh set CAM_BACKYARD_PASS` |
 
 ### Change on the device, then record it here
@@ -817,7 +810,7 @@ command to make the house uninhabitable.
 ### Checking it
 
 ```bash
-bash deploy/verify-hvac.sh
+deploy/health.sh hvac
 ```
 
 Exercises the real service - systemd sandbox, TLS, session cookie - for
@@ -954,7 +947,7 @@ CAMERAS=mic612,backyard               # optional: narrow what this host runs
 
 **Quote values containing shell metacharacters.** systemd parses this file
 itself and does not care, but every script that `source`s it does - adding an
-unquoted password with parentheses in it broke `verify-live.sh` while the
+unquoted password with parentheses in it broke the health checks while the
 service carried on perfectly, which took a while to notice.
 
 A camera whose password is missing is skipped with a reason rather than
@@ -1183,7 +1176,7 @@ the service moves there by itself once the unit is reinstalled:
 
 Startup logs which directory it settled on, and says loudly if none worked.
 Anything touching the sandbox should be checked against the running service
-over HTTPS, not through the test client - `deploy/verify-live.sh` does that,
+over HTTPS, not through the test client - `deploy/checks/live.sh` does that,
 minting a session from the same `EnvironmentFile` the service reads.
 
 ---
@@ -1256,3 +1249,11 @@ Pelco-D frames meant for the camera. The service uses
 **Windows users:** in PowerShell, `curl` is an alias for `Invoke-WebRequest`
 and will prompt for a `Uri` instead of behaving like curl. Use `curl.exe`, or
 run the command on the Pi over ssh.
+
+**WiFi dropouts, before the Pi was wired.** The SSID was broadcast by three
+radios and the supplicant ping-ponged between two weak 5 GHz DFS access points
+one signal unit apart - 11 re-associations in 16 minutes, driven by 802.11v
+BSS Transition Management frames that the brcmfmac firmware answers 'Unknown
+Frame'. Pinning the BSSID took signal 50 to 87. The Pi moved to ethernet and
+its WiFi is off; the full self-verifying fix was `wifi-stabilise.sh`, deleted
+with the move but still in git history should wireless ever return.

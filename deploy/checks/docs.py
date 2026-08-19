@@ -5,13 +5,14 @@ Written after an audit found 35 of the 60 settings the service reads appeared
 in neither the installer nor the docs, and install.sh had not heard of three
 whole subsystems. Documentation rots silently; this makes it rot loudly.
 
-    python3 deploy/verify-docs.py
+    python3 deploy/checks/docs.py
 """
 import re
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+# This file lives in deploy/checks/, two levels below the root.
+ROOT = Path(__file__).resolve().parents[2]
 CODE = ROOT / "camera_service.py"
 EXAMPLE = ROOT / "deploy" / "camera-service.env.example"
 INSTALL = ROOT / "deploy" / "install.sh"
@@ -119,7 +120,7 @@ print("\n== shell scripts can actually run on the target ==")
 # fresh install died at `case "$1" in\r` before doing anything at all. Nothing
 # caught it because nothing ever ran it. This does.
 import subprocess
-for f in sorted((ROOT / "deploy").glob("*.sh")):
+for f in sorted((ROOT / "deploy").glob("*.sh")) + sorted((ROOT / "deploy" / "checks").glob("*.sh")):
     crlf = f.read_bytes().count(b"\r\n")
     check(crlf == 0, "%s has unix line endings%s" % (
         f.name, "" if not crlf else
@@ -179,6 +180,21 @@ for f in sorted(ROOT.rglob("*")):
 check(not leaks, "no literal credentials in tracked files%s"
       % ("" if not leaks else " - " + "; ".join(leaks)))
 
+print("\n== every deploy path the docs mention exists ==")
+# The rename that produced deploy/checks/ left a dozen references to the old
+# verify-* names behind, which is exactly the rot this file exists to catch.
+# Scope: paths written with a deploy/ prefix, which is how the docs cite them.
+stale_refs = []
+for f in (ROOT / "README.md", README, EXAMPLE, CODE, INSTALL):
+    if not f.exists():
+        continue
+    for n, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+        for m in re.finditer(r"deploy/([A-Za-z0-9._/-]+?\.(?:sh|py))", line):
+            if not (ROOT / "deploy" / m.group(1)).exists():
+                stale_refs.append("%s:%d deploy/%s" % (f.name, n, m.group(1)))
+check(not stale_refs, "no doc references a deploy file that is gone%s"
+      % ("" if not stale_refs else " - " + "; ".join(stale_refs[:6])))
+
 print("\n== deploy files are either installed or explained ==")
 # A file nobody runs and nobody mentions is either dead or a forgotten step.
 readme = README.read_text(encoding="utf-8") if README.exists() else ""
@@ -189,6 +205,22 @@ for f in sorted((ROOT / "deploy").iterdir()):
     if f.name in inst or f.name in readme:
         continue
     orphans.append(f.name)
+# The checks moved into a subdirectory the loop above skips. Each one must be
+# wired into health.sh, named in the README, or referenced by another check
+# (lib.sh is sourced by the shell checks) - otherwise it is dead weight that
+# looks like coverage.
+health = (ROOT / "deploy" / "health.sh").read_text(encoding="utf-8")     if (ROOT / "deploy" / "health.sh").exists() else ""
+checks_dir = ROOT / "deploy" / "checks"
+if checks_dir.is_dir():
+    sibling = chr(10).join(p.read_text(encoding="utf-8")
+                        for p in sorted(checks_dir.iterdir())
+                        if p.is_file() and p.suffix in (".sh", ".py"))
+    for f in sorted(checks_dir.iterdir()):
+        if not f.is_file():
+            continue
+        if f.name in health or f.name in readme or f.name in sibling:
+            continue
+        orphans.append("checks/" + f.name)
 check(not orphans, "every deploy file is installed or documented%s"
       % ("" if not orphans else " - orphaned: " + ", ".join(orphans)))
 
