@@ -19,7 +19,12 @@
 #                              the LAN and through the tunnel. Seeing a private
 #                              address here is correct, not a leak of a broken
 #                              record, and chasing it wastes an evening.
-set -uo pipefail
+# Deliberately NOT pipefail. The checks below are `<command> | grep -q ...`,
+# and grep -q exits the instant it matches, which SIGPIPEs the writer; under
+# pipefail that reads as a failed pipeline. It is a race decided by whichever
+# process finishes first, and it made this script report "no desec-ddns units
+# installed" about units it had confirmed working ninety seconds earlier.
+set -u
 cd /opt/camera 2>/dev/null || true
 
 PASS=0; FAIL=0; SKIP=0
@@ -28,6 +33,10 @@ bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$*"; FAIL=$((FAIL+1)); }
 skip() { printf '  \033[33mSKIP\033[0m %s\n' "$*"; SKIP=$((SKIP+1)); }
 note() { printf '       %s\n' "$*"; }
 step() { printf '\n%s\n' "$*"; }
+
+case "${1:-}" in
+    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+esac
 
 UI_HOST="camera.jakeend2.dedyn.io"
 
