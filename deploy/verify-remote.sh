@@ -30,6 +30,43 @@ note() { printf '       %s\n' "$*"; }
 step() { printf '\n%s\n' "$*"; }
 
 UI_HOST="camera.jakeend2.dedyn.io"
+
+# --watch: sit on the wire while you try to connect from the phone, and say
+# which of the three things happened. Timing a capture against somebody else
+# picking up their phone does not work; this waits for them instead.
+if [ "${1:-}" = "--watch" ]; then
+    [ "$(id -u)" -eq 0 ] || { echo "Run with sudo."; exit 1; }
+    SECS="${2:-180}"
+    B=$(wg show wg0 latest-handshakes 2>/dev/null | awk '{print $2}' | head -1)
+    RX0=$(wg show wg0 transfer 2>/dev/null | awk '{print $2}' | head -1)
+    echo "Watching udp/51820 for ${SECS}s. Toggle the tunnel OFF and ON now -"
+    echo "off and on, not just opening the app: that is what makes WireGuard"
+    echo "re-resolve the hostname, which a stale cached address defeats."
+    echo
+    timeout "$SECS" tcpdump -n -i any udp port 51820 2>/dev/null | sed 's/^/  /' &
+    TCPD=$!
+    wait $TCPD 2>/dev/null
+    A=$(wg show wg0 latest-handshakes 2>/dev/null | awk '{print $2}' | head -1)
+    RX1=$(wg show wg0 transfer 2>/dev/null | awk '{print $2}' | head -1)
+    echo
+    if [ "${A:-0}" != "${B:-0}" ]; then
+        echo "HANDSHAKE COMPLETED - the tunnel is up."
+        wg show wg0 endpoints 2>/dev/null | sed 's/^/  from /'
+        echo "Whatever was wrong, re-resolving the endpoint fixed it."
+    elif [ "${RX1:-0}" != "${RX0:-0}" ]; then
+        echo "PACKETS ARRIVED but no handshake completed."
+        echo "The network path is fine; the phone's key or config does not match"
+        echo "this server. Re-issue it: sudo deploy/wireguard-add-client.sh <name>"
+    else
+        echo "NOTHING ARRIVED on 51820."
+        echo "If you really did toggle the tunnel, the packets are being stopped"
+        echo "before this Pi: the router's udp/51820 forward, or the carrier."
+        echo "This port has accepted $(iptables -L -v -n 2>/dev/null | awk '/51820/{print $1; exit}') packets since the rules loaded,"
+        echo "so it has worked before - look at the router first."
+    fi
+    exit 0
+fi
+
 VPN_HOST="${1:-jakeend2.dedyn.io}"
 IFACE="$(ip route show default | awk '/default/{print $5;exit}')"
 LAN_IP="$(ip -o -f inet addr show "$IFACE" | awk '{print $4}' | cut -d/ -f1)"
