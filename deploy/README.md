@@ -73,6 +73,7 @@ that is neither is a forgotten step, and `verify-docs.py` fails if one appears.
 | `verify-hvac.sh` | you | the thermostat, live and by injected payloads |
 | `verify-docs.py` | run by install.sh | fails when the docs drift from the code |
 | `rotate-secret.sh` | you | change a generated secret everywhere it lives |
+| `verify-remote.sh` | you | walk the chain that lets you in from outside |
 
 Run all of them before trusting a change:
 
@@ -462,6 +463,44 @@ sudo tar czf ~/camera-config-backup-$(date +%F).tar.gz \
   /etc/camera-service.env /etc/camera-tls /etc/mosquitto/passwd \
   /etc/mosquitto/aclfile /etc/mosquitto/conf.d/local.conf \
   /etc/desec-ddns.conf /etc/wireguard /etc/systemd/system/camera.service
+```
+
+---
+
+## Getting in from outside, and the two names that are not the same
+
+Reaching the UI from mobile data is eight things in a row, and all eight fail
+identically from the sofa. `deploy/verify-remote.sh` walks them and names the
+first broken link:
+
+```bash
+sudo deploy/verify-remote.sh
+```
+
+Before reading its output, know that **two hostnames do different jobs**, and
+confusing them sends you after the wrong fault:
+
+| Name | Resolves to | Kept current by |
+|---|---|---|
+| `jakeend2.dedyn.io` | this house's **public** IP | the deSEC timer |
+| `camera.jakeend2.dedyn.io` | the Pi's **LAN** address | `setup-letsencrypt.sh`, deliberately |
+
+The second one publishing a private address looks alarming and is correct.
+`setup-letsencrypt.sh` sets it that way on purpose so the name on the
+certificate resolves to the Pi both on the LAN and through the tunnel - that
+is what makes `https://camera.…:5000` work without a certificate warning from
+either side. The VPN endpoint is the *apex*, and that is the record that has
+to track your public IP.
+
+An earlier pass of this check compared the wrong pair - the UI name against
+the public IP - and confidently reported a broken DNS record that was doing
+exactly what it should.
+
+Step 6 is the only link that cannot be tested from inside the house: the
+router has to forward `udp/51820` to the Pi. From somewhere else:
+
+```bash
+nc -vzu <your-public-ip> 51820
 ```
 
 ---
