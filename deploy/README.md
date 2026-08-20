@@ -498,6 +498,38 @@ nc -vzu <your-public-ip> 51820
 
 ---
 
+## Coming back after the device sleeps
+
+Leave the page open, let a phone or laptop sleep, come back: the picture used
+to be frozen until you hit refresh. Nothing in the browser reports that, and
+the measurements are worth recording because they rule out the obvious fixes:
+
+| Signal | What it actually does |
+|---|---|
+| `<img>` `load` | fires **once**, at the first part of the stream - not per frame |
+| `<img>` `error` | **never fires** when a live stream ends |
+| the element itself | keeps painting its last frame indefinitely |
+| resource timing | the entry appears *while* the stream still runs, so it means nothing |
+
+So the page cannot be told the feed died. It can only notice the DEVICE went
+away and rebuild on that basis, which it now does on four triggers:
+
+- **visibilitychange**, but only after more than ten seconds away - a glance
+  at another tab must not tear down the camera's RTSP session
+- **pageshow with `persisted`**, the back/forward cache. iOS Safari resumes a
+  page with every timer and every dead connection exactly as it left them,
+  and fires no visibilitychange at all
+- **online**, when the network comes back
+- a **two-second wall-clock heartbeat**: an interval that finds ten seconds
+  have passed was not running, which means the machine was suspended. This is
+  the only one that catches a laptop lid closing on a focused tab
+
+All four funnel into one `wake()` with a three-second debounce, because a real
+wake fires several of them within a frame of each other and the camera should
+be reconnected once, not four times.
+
+---
+
 ## Credentials, and how to change each one
 
 Twenty-one secrets, audited in full. The ones that bite are the ones stored in

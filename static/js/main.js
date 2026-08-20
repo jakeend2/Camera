@@ -511,6 +511,80 @@
       "IMG:" + (state === "visible" ? "VIS" : state === "thermal" ? "THERM" : "?");
   }
 
+
+  /* ------------------------------------------------------------- waking --
+   * Leave this page open, let the device sleep, come back: the picture is
+   * frozen and the panels show whatever they last knew. Measured in a
+   * browser rather than assumed, because the answer decides the design:
+   *
+   *   - <img> fires `load` ONCE, at the first part of a multipart stream,
+   *     not per frame. It is a usable "we have a picture" signal and no
+   *     kind of heartbeat.
+   *   - when the stream ENDS there is no `error` event and no event of any
+   *     other kind. The element just keeps painting its last frame for ever.
+   *   - resource timing does not help either: the entry appears while the
+   *     stream is still running, so its presence means nothing.
+   *
+   * So the page cannot be told the feed died. It can only notice that the
+   * DEVICE went away and rebuild on that basis. Three lifecycle events say
+   * so, plus a wall-clock check for the cases none of them fire in - a
+   * laptop lid closing on a focused tab is the common one.
+   */
+  var wokeAt = 0;
+  var hiddenAt = 0;
+
+  function wake(why) {
+    if (document.hidden) return;          // nothing to rebuild for nobody
+    var now = Date.now();
+    // Several of these fire together on a real wake - visibilitychange and
+    // pageshow arrive within a frame of each other. One rebuild, not three.
+    if (now - wokeAt < 3000) return;
+    wokeAt = now;
+
+    lastFrames = -1;                      // the delta across a gap is meaningless
+    showFeed(currentCam);                 // its token supersedes any stream in flight
+    poll();
+    refreshGarage();
+    refreshHvac();
+    warmOthers();
+  }
+
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) { hiddenAt = Date.now(); return; }
+    // A glance at another tab does not kill the stream; a sleep does. Only
+    // rebuild after a real absence, so flipping between tabs does not churn
+    // the camera's RTSP session for nothing.
+    if (hiddenAt && Date.now() - hiddenAt > 10000) {
+      wake("visible again");
+    } else {
+      poll();
+      refreshGarage();
+      refreshHvac();
+    }
+  });
+
+  // Returning from the back/forward cache. iOS Safari especially: the page
+  // resumes with every timer and every dead connection exactly as it left
+  // them, and no visibilitychange is fired.
+  window.addEventListener("pageshow", function (ev) {
+    if (ev.persisted) wake("restored from bfcache");
+  });
+
+  window.addEventListener("online", function () { wake("network returned"); });
+
+  /* The wall clock catches what the lifecycle events miss. A suspended
+   * device stops running timers, so an interval that should have fired every
+   * two seconds and finds ten have passed is evidence the machine was asleep
+   * even when the tab never became hidden.
+   */
+  var lastBeat = Date.now();
+  setInterval(function () {
+    var now = Date.now();
+    var gap = now - lastBeat;
+    lastBeat = now;
+    if (gap > 10000) wake("clock jumped " + Math.round(gap / 1000) + "s");
+  }, 2000);
+
   // -------------------------------------------------------- health poll ---
   var lastFrames = -1;
   function poll() {
