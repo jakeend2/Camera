@@ -102,6 +102,14 @@
     var src = withCam("/camera");
     src += (src.indexOf("?") >= 0 ? "&" : "?") + "_=" + Date.now();
 
+    // Drop the previous attempt's listener before adding another. Only the
+    // successful path used to remove it, so every attempt that never produced
+    // a frame - service restarting, session expired, a cold substream that
+    // outran the fifteen-second window - left one attached. That was survivable
+    // when this only ran on a camera switch, and is not now that every wake
+    // calls it.
+    if (feedLive) feed.removeEventListener("load", feedLive);
+
     function live() {
       // A later switch may already own the frame, and the blank placeholder
       // fires load as well - but it is 1x1, so its size tells it apart from a
@@ -110,10 +118,15 @@
       if (token !== feedToken) return;
       if (feed.naturalWidth <= 2) return;
       feed.removeEventListener("load", live);
+      feedLive = null;
       if (frame) frame.classList.remove("switching");
     }
+    feedLive = live;
     feed.addEventListener("load", live);
     feed.src = src;
+    // Comparing the next poll against a count from before the gap is what
+    // produced "CAM OK" over a dead picture. Start the comparison again.
+    lastFrames = -1;
 
     setTimeout(function () {
       if (token !== feedToken || !frame) return;
@@ -532,6 +545,7 @@
    */
   var wokeAt = 0;
   var hiddenAt = 0;
+  var feedLive = null;      // the load listener showFeed currently has attached
 
   function wake(why) {
     if (document.hidden) return;          // nothing to rebuild for nobody
@@ -550,7 +564,11 @@
   }
 
   document.addEventListener("visibilitychange", function () {
-    if (document.hidden) { hiddenAt = Date.now(); return; }
+    if (document.hidden) {
+      hiddenAt = Date.now();
+      abandonPendingSetpoint();
+      return;
+    }
     // A glance at another tab does not kill the stream; a sleep does. Only
     // rebuild after a real absence, so flipping between tabs does not churn
     // the camera's RTSP session for nothing.
@@ -570,6 +588,12 @@
     if (ev.persisted) wake("restored from bfcache");
   });
 
+  // pagehide covers the bfcache and the tab simply going away, neither of
+  // which fires visibilitychange on every platform.
+  window.addEventListener("pagehide", function () {
+    abandonPendingSetpoint();
+  });
+
   window.addEventListener("online", function () { wake("network returned"); });
 
   /* The wall clock catches what the lifecycle events miss. A suspended
@@ -585,19 +609,54 @@
     if (gap > 10000) wake("clock jumped " + Math.round(gap / 1000) + "s");
   }, 2000);
 
+  /* Any fetch can come back 401 - most likely straight after a wake, because
+   * session_protection is "strong" and a phone that wakes on cellular has a
+   * different address than the one the session was minted for. Every panel
+   * used to render that as its own device being offline: the garage "not
+   * responding", the thermostat "stale", the feed "NO PICTURE". Blaming the
+   * hardware for a login problem sends you to the garage to check a fuse.
+   */
+  var signedOut = false;
+  function noteSignedOut() {
+    if (signedOut) return;
+    signedOut = true;
+    var link = $("st-link");
+    if (link) { link.textContent = "SIGNED OUT"; link.classList.add("bad"); }
+    flash("session expired - reload to sign in", true);
+  }
+  function asJson(r) {
+    if (r.status === 401) { noteSignedOut(); throw new Error("signed out"); }
+    return r.json();
+  }
+
   // -------------------------------------------------------- health poll ---
   var lastFrames = -1;
   function poll() {
     fetch(withCam("/health"), { credentials: "include" })
-      .then(function (r) { return r.json(); })
+      .then(asJson)
       .then(function (h) {
+        signedOut = false;
         var rec = $("rec-dot");
         if (rec) rec.classList.toggle("live", !!h.recording);
         var link = $("st-link");
         if (link) {
+          /* This counts the CAMERA's frames, not ours. preview_frames is a
+           * server-side counter, and for a camera whose preview comes off the
+           * recorder it advances whether or not anybody is connected - so a
+           * rising delta says the camera is alive and says nothing whatever
+           * about the picture on this screen. It used to be labelled LINK OK,
+           * which after a sleep was printed in confident white over a frame
+           * hours old.
+           *
+           * There is no honest client-side alternative: an <img> fires `load`
+           * once, at the first part of the stream, never again, and fires
+           * nothing at all when the stream dies. So the label now says what it
+           * measures - the camera - and waking rebuilds the stream rather than
+           * trying to detect its death.
+           */
           var moving = lastFrames >= 0 && h.preview_frames > lastFrames;
           var first = lastFrames < 0;
-          link.textContent = first ? "LINK ·" : (moving ? "LINK OK" : "LINK STALL");
+          link.textContent = first ? "CAM ·" : (moving ? "CAM OK" : "CAM STALL");
           link.classList.toggle("bad", !first && !moving);
           lastFrames = h.preview_frames;
         }
@@ -612,8 +671,21 @@
         if ($("sys-free")) $("sys-free").textContent = h.free_gb + " GB";
       })
       .catch(function () {
+        // The catch used to touch only the strip, so a laptop that woke
+        // somewhere it could not reach the Pi kept showing last night's
+        // filename, size and free space as though they were current.
         var link = $("st-link");
-        if (link) { link.textContent = "LINK ?"; link.classList.add("bad"); }
+        if (link && !signedOut) {
+          link.textContent = "CAM ?";
+          link.classList.add("bad");
+        }
+        var rec = $("rec-dot");
+        if (rec) rec.classList.remove("live");
+        lastFrames = -1;
+        ["sys-file", "sys-size", "sys-archive", "sys-free"].forEach(function (id) {
+          if ($(id)) $(id).textContent = "–";
+        });
+        markImager("unknown");
       });
   }
   poll();
@@ -650,13 +722,22 @@
       door.textContent = g.online ? (g.door || "?") : "offline";
       door.classList.toggle("bad", !g.online || g.door === "Open");
     }
+    /* Offline means we know nothing, not that everything is fine. The door
+     * already said "offline" honestly while the three rows beneath it read
+     * "clear", "off" and "unlocked" - not remembered values, but the absent
+     * fields of a failed payload rendered as fact. "Remotes: unlocked" is a
+     * statement about a lock, and it was being printed from nothing.
+     */
+    var known = g.online === true;
     var obst = $("g-obst");
     if (obst) {
-      obst.textContent = g.obstructed ? "BLOCKED" : "clear";
-      obst.classList.toggle("bad", !!g.obstructed);
+      obst.textContent = known ? (g.obstructed ? "BLOCKED" : "clear") : "–";
+      obst.classList.toggle("bad", known && !!g.obstructed);
     }
-    if ($("g-light")) $("g-light").textContent = g.light ? "on" : "off";
-    if ($("g-lock")) $("g-lock").textContent = g.locked ? "locked" : "unlocked";
+    if ($("g-light")) $("g-light").textContent =
+      known ? (g.light ? "on" : "off") : "–";
+    if ($("g-lock")) $("g-lock").textContent =
+      known ? (g.locked ? "locked" : "unlocked") : "–";
     if ($("g-meta")) {
       $("g-meta").textContent = g.online
         ? (g.device || "garage") + " · " + (g.openings || 0) + " openings · " +
@@ -683,7 +764,7 @@
   function refreshGarage() {
     if (!garagePane) return;
     fetch("/garage", { credentials: "include" })
-      .then(function (r) { return r.json(); })
+      .then(asJson)
       .then(paintGarage)
       .catch(function () { paintGarage({ online: false }); });
   }
@@ -728,6 +809,25 @@
     return h ? h["setpoint_" + which] : null;
   }
   var spTimer = null;
+  var spArmedAt = 0;
+
+  /* A setpoint the user did not stay to watch must not be delivered later.
+   * The hint tells them it goes "a few seconds after you stop adjusting", so
+   * tapping + twice and locking the phone inside that window is the natural
+   * gesture - and a suspended page resumes its timers on wake. Six hours
+   * later that fires an ABSOLUTE setpoint computed from a base that has since
+   * moved, and the thermostat changes at three in the morning. Drop it on the
+   * way out rather than deferring it.
+   */
+  function abandonPendingSetpoint() {
+    if (!spTimer && pendingSp.heat == null && pendingSp.cool == null) return;
+    clearTimeout(spTimer);
+    spTimer = null;
+    spArmedAt = 0;
+    pendingSp.heat = pendingSp.cool = null;
+    if ($("h-pending")) $("h-pending").innerHTML = "&nbsp;";
+    if (typeof hvacState !== "undefined" && hvacState) paintHvac(hvacState);
+  }
 
   function paintHvac(h) {
     if (!hvacPane || !h) return;
@@ -798,6 +898,14 @@
   }
 
   function sendPending() {
+    // Belt and braces for the case the page was suspended between arming and
+    // firing: an absolute setpoint derived from a base that old is not worth
+    // sending, whatever woke the timer.
+    if (spArmedAt && Date.now() - spArmedAt > 30000) {
+      abandonPendingSetpoint();
+      return;
+    }
+    spArmedAt = 0;
     var jobs = [];
     ["heat", "cool"].forEach(function (which) {
       if (pendingSp[which] == null) return;
@@ -848,6 +956,7 @@
     }
     clearTimeout(spTimer);
     spTimer = setTimeout(sendPending, 2000);
+    spArmedAt = Date.now();
   }
 
   document.querySelectorAll("[data-sp]").forEach(function (btn) {

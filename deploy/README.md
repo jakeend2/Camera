@@ -530,6 +530,40 @@ be reconnected once, not four times.
 
 ---
 
+## What the page will not claim
+
+An audit of the sleep/wake behaviour found several places the page asserted
+things it did not know - all of them worst right after a wake, which is
+exactly when a user is most likely to act on what they see.
+
+- **The status strip says `CAM`, not `LINK`.** `preview_frames` is a counter
+  on the *server*. For a camera whose preview comes off the recorder it
+  advances whether or not anybody is connected, so a rising delta means the
+  camera is alive and says nothing about the picture on your screen. Labelled
+  `LINK OK`, it printed confident white over frames hours old. There is no
+  honest client-side alternative - an `<img>` fires `load` once and reports
+  nothing when a stream dies - so the label now names what it measures.
+- **A 401 is a 401.** Session protection is `strong`, which ties a session to
+  the client address, so a phone waking on cellular gets logged out. Every
+  panel used to render that as its own device being offline: the garage "not
+  responding", the thermostat "stale". Blaming the hardware for a login
+  problem sends you to the garage to check a fuse. The strip now says
+  `SIGNED OUT`.
+- **A failed health poll blanks the system stats** rather than leaving last
+  night's filename, sizes and free space sitting there as current.
+- **The garage panel shows `–` when it cannot reach the device.** The door row
+  was honest ("offline") while the three rows beneath it read "clear", "off"
+  and "unlocked" - not remembered values, but the absent fields of a failed
+  payload rendered as fact. "Remotes: unlocked" is a statement about a lock.
+- **An abandoned setpoint is dropped, not deferred.** Tapping the thermostat
+  and locking the phone inside the two-second debounce used to leave a timer
+  armed in a suspended page; it fired on wake and delivered an absolute
+  setpoint computed from a base that had since moved. Hours later, at three in
+  the morning. It is now discarded on `visibilitychange` and `pagehide`, and
+  refuses to fire if it somehow survives.
+
+---
+
 ## Credentials, and how to change each one
 
 Twenty-one secrets, audited in full. The ones that bite are the ones stored in
