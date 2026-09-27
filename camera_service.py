@@ -361,6 +361,12 @@ HVAC_MAX_F = _env_int("HVAC_MAX_F", 90)
 # How long a reading stays believable, and how long to wait for the gateway to
 # say whether it accepted a command before giving up on it.
 HVAC_STALE_AFTER = _env_int("HVAC_STALE_AFTER", 900)
+# A single *measurement* stays displayable far longer than that. A
+# thermostat's reports are event-driven: a room temperature that is not
+# changing is not re-reported, so hours of silence is not the fault it
+# would be on a chatty device - days of it is. This is the window between
+# "slow but still true" and "stuck, no longer information".
+HVAC_READING_STALE = _env_int("HVAC_READING_STALE", 21600)
 HVAC_WRITE_TIMEOUT = _env_int("HVAC_WRITE_TIMEOUT", 8)
 
 _FONT_CANDIDATES = (
@@ -3125,6 +3131,22 @@ class Hvac:
 
     # -- present ------------------------------------------------------------
     @staticmethod
+    def _fresh(seen: dict, name: str, now: float, values: dict):
+        """A reading only while that reading itself is fresh.
+
+        Per value on purpose. Age used to be judged by the newest reading
+        of any kind, so a chatty one - humidity arrives every few minutes -
+        kept a four-day-old temperature looking live, and a thermostat with
+        a stuck sensor reported 116 F as if it were current. A value that
+        has fallen behind is None, and the page already knows how to draw
+        None: a dash.
+        """
+        at = seen.get(name)
+        if at is None or now - at >= HVAC_READING_STALE:
+            return None
+        return values.get(name)
+
+    @staticmethod
     def _to_f(value, unit):
         """A reading in Fahrenheit, or None when the unit is not known.
 
@@ -3145,8 +3167,10 @@ class Hvac:
 
     @property
     def state(self) -> dict:
+        now = time.time()
         with self._lock:
             v = dict(self._values)
+            seen = dict(self._seen_at)
             newest = max(self._seen_at.values(), default=0)
             alive = self._alive
             units = dict(self._units)
@@ -3169,6 +3193,11 @@ class Hvac:
         eco = mode in (11, 12)
         heat_key = "setpoint_heat_eco" if eco else "setpoint_heat"
         cool_key = "setpoint_cool_eco" if eco else "setpoint_cool"
+        # Setpoints are not gated by age. A measurement that stops
+        # reporting is a fault; a setpoint that has not re-reported is
+        # simply a setpoint nobody changed - the device publishes these
+        # once and then only on change, so an old one is not a suspect
+        # one, and gating them would blank them after every restart.
         sp_heat = self._to_f(v.get(heat_key), units.get(heat_key))
         sp_cool = self._to_f(v.get(cool_key), units.get(cool_key))
         # Everything is presented in Fahrenheit whatever the device reports,
@@ -3181,13 +3210,19 @@ class Hvac:
             "alive": alive,
             "age_s": round(age) if age is not None else None,
             "node": HVAC_NODE,
-            "temperature_f": self._to_f(v.get("temperature"),
+            # Raw and converted stand or fall together: a stale reading is
+            # not information, and the browser would otherwise show the
+            # stale number under its stale unit. The unit itself is
+            # metadata from the interview, not a reading, so it stays.
+            "temperature_f": self._to_f(self._fresh(seen, "temperature",
+                                                    now, v),
                                         units.get("temperature")),
-            "temperature_raw": v.get("temperature"),
+            "temperature_raw": self._fresh(seen, "temperature", now, v),
             "temperature_unit": units.get("temperature"),
             "units_known": bool(units),
-            "humidity": v.get("humidity"),
-            "battery": v.get("battery"),
+            "humidity": self._fresh(seen, "humidity", now, v),
+            "battery": v.get("battery"),  # reports when it changes; age
+                                            # carries no suspicion
             "mode": mode,
             "mode_label": self.MODES.get(mode, "?" if mode is None else str(mode)),
             "operating_state": op,
