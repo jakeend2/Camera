@@ -309,16 +309,15 @@ TLS_AVAILABLE = Path(TLS_CERT).exists() and Path(TLS_KEY).exists()
 # Web login. Credentials arrive from /etc/camera-service.env, never the repo.
 # Without them the service still runs but logs a loud warning - losing the
 # recording because a password file went missing would be a worse failure.
-WEB_USERNAME = os.environ.get("WEB_USERNAME", "admin")
-WEB_PASSWORD_HASH = os.environ.get("WEB_PASSWORD_HASH") or None
-# Four digits instead of a username and password, so the login is one-handed
-# on a phone. The same hashing as the password; the keyspace is only 10,000,
-# which is exactly why the per-address throttling below still guards it.
-# While a PIN is configured the username/password path stays closed; remove
-# WEB_PIN_HASH from the env file and that path returns.
 WEB_PIN_HASH = os.environ.get("WEB_PIN_HASH") or None
 SECRET_KEY = os.environ.get("FLASK_SECRET_KEY") or None
-AUTH_ENABLED = bool((WEB_PIN_HASH or WEB_PASSWORD_HASH) and SECRET_KEY)
+AUTH_ENABLED = bool(WEB_PIN_HASH and SECRET_KEY)
+# Four digits instead of a username and password, so the login is one-handed
+# on a phone. Scrypt-hashed like the password it replaced; the keyspace is
+# only 10,000, which is exactly why the per-address throttling below guards
+# it. flask-login still wants an id for the one operator session - this is
+# a constant, not a credential.
+WEB_USERNAME = "operator"
 SESSION_HOURS = 12
 LOGIN_MAX_ATTEMPTS = 5
 LOGIN_LOCKOUT_SECONDS = 300
@@ -1737,20 +1736,9 @@ def login():
                 login_user(User(), remember=False)
                 log.info("PIN login from %s", addr)
                 return redirect(_safe_next(request))
-            # Fallback for when no PIN is configured: the original login.
-            username = request.form.get("username", "")
-            password = request.form.get("password", "")
-            if (WEB_PASSWORD_HASH and not WEB_PIN_HASH
-                    and username == WEB_USERNAME
-                    and check_password_hash(WEB_PASSWORD_HASH, password)):
-                _clear_failures(addr)
-                login_user(User(), remember=False)
-                log.info("Login succeeded for '%s' from %s", username, addr)
-                return redirect(_safe_next(request))
             _note_failure(addr)
             log.warning("Failed login from %s", addr)
-            error = ("Incorrect PIN." if WEB_PIN_HASH
-                     else "Incorrect username or password.")
+            error = "Incorrect PIN."
 
     return make_response(render_template("login.html", error=error), 401 if error else 200)
 
@@ -3653,9 +3641,9 @@ def main() -> None:
     if FONT is None:
         log.warning("No DejaVu font found - recording without a timestamp overlay")
     if AUTH_ENABLED:
-        log.info("Web login required for user '%s'", WEB_USERNAME)
+        log.info("Web login required (4-digit PIN)")
     else:
-        log.warning("NO WEB AUTHENTICATION - set WEB_PASSWORD_HASH and "
+        log.warning("NO WEB AUTHENTICATION - set WEB_PIN_HASH and "
                     "FLASK_SECRET_KEY in /etc/camera-service.env")
 
     signal.signal(signal.SIGINT, handle_signal)

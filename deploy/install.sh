@@ -29,7 +29,7 @@
 #   --dry-run          report what would change, touch nothing
 #   --video PATH       skip capture-device detection
 #   --serial PATH      skip serial-device detection
-#   --password PASS    set the web password non-interactively
+#   --pin NNNN         set the web PIN non-interactively
 set -euo pipefail
 
 INSTALL_DIR=/opt/camera
@@ -39,14 +39,14 @@ TLS_DIR=/etc/camera-tls
 DRY_RUN=0
 VIDEO_OVERRIDE=""
 SERIAL_OVERRIDE=""
-WEB_PASSWORD=""
+WEB_PIN=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --dry-run)  DRY_RUN=1; shift ;;
         --video)    VIDEO_OVERRIDE="$2"; shift 2 ;;
         --serial)   SERIAL_OVERRIDE="$2"; shift 2 ;;
-        --password) WEB_PASSWORD="$2"; shift 2 ;;
+        --pin)      WEB_PIN="$2"; shift 2 ;;
         -h|--help)  sed -n '2,25p' "$0"; exit 0 ;;
         *)          echo "Unknown option: $1"; exit 1 ;;
     esac
@@ -255,7 +255,6 @@ env_add MQTT_PORT 1883
 env_add MQTT_USERNAME camera
 env_add MQTT_PASSWORD "$MQTT_PW"
 env_add FLASK_SECRET_KEY "$(openssl rand -hex 32)"
-env_add WEB_USERNAME admin
 
 # Detected hardware, so nothing host-specific stays in the source.
 env_add VIDEO_DEVICE "$VIDEO_DEVICE"
@@ -281,22 +280,22 @@ env_add CAM_BACKYARD_USER ""
 env_add CAM_BACKYARD_PASS ""
 env_add HVAC_NODE ""
 
-GENERATED_PW=""
-if ! env_has WEB_PASSWORD_HASH; then
-    if [ -z "$WEB_PASSWORD" ]; then
-        GENERATED_PW="$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 20)"
-        WEB_PASSWORD="$GENERATED_PW"
+GENERATED_PIN=""
+if ! env_has WEB_PIN_HASH; then
+    if [ -z "$WEB_PIN" ]; then
+        GENERATED_PIN="$(printf '%04d' $((RANDOM % 10000)))"
+        WEB_PIN="$GENERATED_PIN"
     fi
     if [ "$DRY_RUN" -eq 1 ]; then
-        info "would generate WEB_PASSWORD_HASH"
+        info "would write WEB_PIN_HASH"
     else
-        HASH="$(P="$WEB_PASSWORD" "$INSTALL_DIR/venv/bin/python" -c \
+        HASH="$(P="$WEB_PIN" "$INSTALL_DIR/venv/bin/python" -c \
             'import os; from werkzeug.security import generate_password_hash; print(generate_password_hash(os.environ["P"]))')"
-        printf "WEB_PASSWORD_HASH='%s'\n" "$HASH" >> "$ENV_FILE"
-        info "WEB_PASSWORD_HASH written."
+        printf "WEB_PIN_HASH='%s'\n" "$HASH" >> "$ENV_FILE"
+        info "WEB_PIN_HASH written."
     fi
 else
-    info "WEB_PASSWORD_HASH already set, keeping it."
+    info "WEB_PIN_HASH already set, keeping it."
 fi
 
 # ---------------------------------------------------------------------------
@@ -415,13 +414,12 @@ cat <<EOF
 Done.
 
   Web UI    https://${LAN_IP}:5000
-  Username  admin
 EOF
-[ -n "$GENERATED_PW" ] && cat <<EOF
-  Password  ${GENERATED_PW}
+[ -n "$GENERATED_PIN" ] && cat <<EOF
+  PIN       ${GENERATED_PIN}
 
   ^ generated, shown once. Change it with:
-      sudo ${INSTALL_DIR}/deploy/rotate-secret.sh web
+      sudo ${INSTALL_DIR}/deploy/rotate-secret.sh pin
 EOF
 cat <<EOF
 

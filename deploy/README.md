@@ -159,8 +159,7 @@ MQTT_PORT=1883
 MQTT_USERNAME=camera
 MQTT_PASSWORD=<generated>
 FLASK_SECRET_KEY=<32 random hex bytes>
-WEB_USERNAME=admin
-WEB_PASSWORD_HASH='<scrypt hash>'
+WEB_PIN_HASH='<scrypt hash of the 4-digit PIN>'
 ```
 
 ```bash
@@ -171,12 +170,12 @@ Generate the pieces with:
 
 ```bash
 openssl rand -hex 32                                    # FLASK_SECRET_KEY
-/opt/camera/venv/bin/python -c "from werkzeug.security import generate_password_hash; print(generate_password_hash('yourpassword'))"
+/opt/camera/venv/bin/python -c "from werkzeug.security import generate_password_hash; print(generate_password_hash('1234'))"
 ```
 
 Quote the hash in the env file — it contains `$` characters.
 
-Change the web password later with **`rotate-secret.sh web`**, which prompts
+Change the web PIN later with **`rotate-secret.sh pin`**, which prompts
 without echo, writes only the hash, and restarts the service.
 
 ### 4. TLS certificate
@@ -575,7 +574,7 @@ for ever. `rotate-secret.sh` exists for exactly those.
 
 | Secret | Command |
 |---|---|
-| Web UI login | `sudo deploy/rotate-secret.sh web` |
+| Web UI login PIN | `sudo deploy/rotate-secret.sh pin` |
 | MQTT `camera` | `sudo deploy/rotate-secret.sh mqtt-camera` |
 | MQTT `ratgdo` | `sudo deploy/rotate-secret.sh mqtt-ratgdo` |
 | MQTT `zwave` | `sudo deploy/rotate-secret.sh mqtt-zwave` |
@@ -614,7 +613,7 @@ keys - every device must be excluded and re-paired.
 - **An empty `CAM_BACKYARD_PASS` does not error.** `build_cameras()` skips any
   RTSP camera with no password, so the camera silently disappears and stops
   recording.
-- **`WEB_PASSWORD_HASH` and `FLASK_SECRET_KEY` are coupled by presence**: both
+- **`WEB_PIN_HASH` and `FLASK_SECRET_KEY` are coupled by presence**: both
   must be non-empty or authentication switches off entirely.
 
 ---

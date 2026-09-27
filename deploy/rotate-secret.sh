@@ -8,7 +8,7 @@
 #   mqtt-ratgdo   broker password for the 'ratgdo' user  (the garage bridge)
 #   mqtt-zwave    broker password for the 'zwave' user   (zwave-js-ui)
 #   flask         the session signing key - logs everyone out
-#   web           the web UI password (prompts, stores only the hash)
+#   pin           the web login PIN (prompts, stores only the hash)
 #   tls           self-signed TLS key + certificate   [tls <lan-ip>]
 #
 #   set <NAME>    prompt for a value you set elsewhere - on the camera, on
@@ -50,7 +50,7 @@ run()  { if [ "$DRY" -eq 1 ]; then printf '   would: %s\n' "$*"; else "$@"; fi; 
 
 # Usage first, so asking what this does does not require root.
 case "$WHAT" in
-    mqtt-camera|mqtt-ratgdo|mqtt-zwave|flask|set|web|tls) : ;;
+    mqtt-camera|mqtt-ratgdo|mqtt-zwave|flask|set|pin|tls) : ;;
     *) awk 'NR > 1 { if (!/^#/) exit; print }' "$0"; exit 1 ;;
 esac
 [ "$(id -u)" -eq 0 ] || die "Run with sudo."
@@ -97,21 +97,24 @@ env_get() {
     sed -n "s/^$1=//p" "$ENV_FILE" | head -1 | sed 's/^"//; s/"$//; s/^'"'"'//; s/'"'"'$//'
 }
 
-if [ "$WHAT" = "web" ]; then
-    say "Web UI password"
-    printf '   New password (not echoed): '
+if [ "$WHAT" = "pin" ]; then
+    say "Web login PIN"
+    printf '   New 4-digit PIN (not echoed): '
     read -rs P1; echo
     printf '   Again: '
     read -rs P2; echo
     if [ "$P1" != "$P2" ]; then die "They do not match - nothing changed."; fi
-    if [ ${#P1} -lt 12 ]; then die "Use at least 12 characters."; fi
+    case "$P1" in
+        [0-9][0-9][0-9][0-9]) : ;;
+        *) die "The PIN must be exactly four digits." ;;
+    esac
     HASH=$(P="$P1" /opt/camera/venv/bin/python -c \
         'import os; from werkzeug.security import generate_password_hash; print(generate_password_hash(os.environ["P"]))')
     unset P1 P2
-    env_set WEB_PASSWORD_HASH "$HASH"
+    env_set WEB_PIN_HASH "$HASH"
     run rm -f /etc/camera-web-initial-password
     run systemctl restart camera.service
-    info "Password updated. Existing sessions stay signed in - rotate 'flask'"
+    info "PIN updated. Existing sessions stay signed in - rotate 'flask'"
     info "as well to sign everyone out."
     exit 0
 fi
