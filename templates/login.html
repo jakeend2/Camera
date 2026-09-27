@@ -12,13 +12,11 @@
       {% endif %}
 
       <form method="post" autocomplete="off">
-        <label class="login-label" for="username">OPERATOR</label>
-        <input class="login-input" type="text" id="username" name="username"
-               autocomplete="username" required autofocus>
-
-        <label class="login-label" for="password">ACCESS CODE</label>
-        <input class="login-input" type="password" id="password" name="password"
-               autocomplete="current-password" required>
+        <label class="login-label" for="pin">ACCESS CODE</label>
+        <input class="login-input pin-input" type="password" id="pin" name="pin"
+               inputmode="numeric" pattern="[0-9]*" maxlength="4" minlength="4"
+               autocomplete="one-time-code" autofocus required
+               {% if error %}value="{{ request.form.pin }}"{% endif %}>
 
         <button class="login-button" type="submit">ENGAGE</button>
       </form>

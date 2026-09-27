@@ -311,8 +311,14 @@ TLS_AVAILABLE = Path(TLS_CERT).exists() and Path(TLS_KEY).exists()
 # recording because a password file went missing would be a worse failure.
 WEB_USERNAME = os.environ.get("WEB_USERNAME", "admin")
 WEB_PASSWORD_HASH = os.environ.get("WEB_PASSWORD_HASH") or None
+# Four digits instead of a username and password, so the login is one-handed
+# on a phone. The same hashing as the password; the keyspace is only 10,000,
+# which is exactly why the per-address throttling below still guards it.
+# While a PIN is configured the username/password path stays closed; remove
+# WEB_PIN_HASH from the env file and that path returns.
+WEB_PIN_HASH = os.environ.get("WEB_PIN_HASH") or None
 SECRET_KEY = os.environ.get("FLASK_SECRET_KEY") or None
-AUTH_ENABLED = bool(WEB_PASSWORD_HASH and SECRET_KEY)
+AUTH_ENABLED = bool((WEB_PIN_HASH or WEB_PASSWORD_HASH) and SECRET_KEY)
 SESSION_HOURS = 12
 LOGIN_MAX_ATTEMPTS = 5
 LOGIN_LOCKOUT_SECONDS = 300
@@ -1697,6 +1703,23 @@ def require_login():
     return redirect(url_for("login", next=request.path))
 
 
+_PIN_RE = re.compile(r"\d{4}")
+
+
+def _pin_ok(pin: str) -> bool:
+    """Four digits against the stored hash. No PIN configured, never true."""
+    return (WEB_PIN_HASH is not None and _PIN_RE.fullmatch(pin) is not None
+            and check_password_hash(WEB_PIN_HASH, pin))
+
+
+def _safe_next(req) -> str:
+    """The redirect target after a login, allowed to be only our own site."""
+    nxt = req.args.get("next", "")
+    if not nxt.startswith("/") or nxt.startswith("//"):
+        return url_for("index")
+    return nxt
+
+
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if not AUTH_ENABLED:
@@ -1709,21 +1732,25 @@ def login():
         if wait:
             error = f"Too many attempts. Try again in {wait} seconds."
         else:
+            if _pin_ok(request.form.get("pin", "")):
+                _clear_failures(addr)
+                login_user(User(), remember=False)
+                log.info("PIN login from %s", addr)
+                return redirect(_safe_next(request))
+            # Fallback for when no PIN is configured: the original login.
             username = request.form.get("username", "")
             password = request.form.get("password", "")
-            if (username == WEB_USERNAME
+            if (WEB_PASSWORD_HASH and not WEB_PIN_HASH
+                    and username == WEB_USERNAME
                     and check_password_hash(WEB_PASSWORD_HASH, password)):
                 _clear_failures(addr)
                 login_user(User(), remember=False)
                 log.info("Login succeeded for '%s' from %s", username, addr)
-                nxt = request.args.get("next", "")
-                # Only ever redirect within this site.
-                if not nxt.startswith("/") or nxt.startswith("//"):
-                    nxt = url_for("index")
-                return redirect(nxt)
+                return redirect(_safe_next(request))
             _note_failure(addr)
-            log.warning("Failed login for '%s' from %s", username, addr)
-            error = "Incorrect username or password."
+            log.warning("Failed login from %s", addr)
+            error = ("Incorrect PIN." if WEB_PIN_HASH
+                     else "Incorrect username or password.")
 
     return make_response(render_template("login.html", error=error), 401 if error else 200)
 
