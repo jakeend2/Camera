@@ -22,7 +22,7 @@ CONF=/etc/desec-ddns.conf
 # over v6 and leave the A record - the one the port forward needs - stale.
 #
 # myipv6=preserve leaves any AAAA record alone rather than clearing it.
-response=$(curl -4 -sS --max-time 30 \
+response=$(curl -4 -sS --max-time 30 --retry 2 --retry-delay 5 \
     --user "${DESEC_DOMAIN}:${DESEC_TOKEN}" \
     "https://update.dedyn.io/?myipv6=preserve" 2>&1) || {
         echo "update failed: ${response}" >&2
