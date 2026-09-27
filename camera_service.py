@@ -2959,6 +2959,8 @@ class Hvac:
         self._alive = None
         # Units, as declared by the gateway. Empty until it answers.
         self._units: dict = {}
+        # When we last asked, so the retry in state() cannot become a storm.
+        self._asked_at = 0.0
         # Writes awaiting the gateway's verdict, keyed by the args we sent,
         # because that is exactly what the gateway echoes back.
         self._pending: dict = {}
@@ -2974,6 +2976,12 @@ class Hvac:
         client.subscribe(f"{self.base}/#", qos=0)
         client.subscribe(f"{HVAC_PREFIX}/{HVAC_GATEWAY}/api/writeValue", qos=0)
         client.subscribe(f"{HVAC_PREFIX}/{HVAC_GATEWAY}/api/getNodes", qos=0)
+        # The gateway announces itself (retained) when it reaches the broker,
+        # and the driver again when the radio is ready. Both start alongside
+        # this service at boot and take longer to get here, so the question
+        # below can go out before anyone is listening - see ingest().
+        client.subscribe(f"{HVAC_PREFIX}/{HVAC_GATEWAY}/status", qos=0)
+        client.subscribe(f"{HVAC_PREFIX}/driver/status", qos=0)
         self._ask_units()
 
     def handles(self, topic: str) -> bool:
@@ -2989,6 +2997,22 @@ class Hvac:
             return
         if topic == f"{HVAC_PREFIX}/{HVAC_GATEWAY}/api/getNodes":
             self._absorb_units(body)
+            return
+        if topic in (f"{HVAC_PREFIX}/{HVAC_GATEWAY}/status",
+                     f"{HVAC_PREFIX}/driver/status"):
+            # The gateway or its driver just came up. If that happened after
+            # our first question, nobody heard it - ask again. The retained
+            # copies replayed on every connect land here too, harmlessly:
+            # units are only asked for while they are still unknown.
+            up = body.get("value") if isinstance(body, dict) else body
+            with self._lock:
+                known = bool(self._units)
+            # Within a few seconds of asking, the answer is most likely still
+            # in flight - the retained copies arrive right behind the
+            # subscription, ahead of the first reply.
+            recent = time.time() - self._asked_at < 5
+            if up is True and not known and not recent:
+                self._ask_units()
             return
         if not topic.startswith(self.base + "/"):
             return
@@ -3041,6 +3065,7 @@ class Hvac:
         """Ask the gateway what units this node reports in."""
         if self._client is None:
             return
+        self._asked_at = time.time()
         try:
             self._client.publish(
                 f"{HVAC_PREFIX}/{HVAC_GATEWAY}/api/getNodes/set",
@@ -3110,6 +3135,10 @@ class Hvac:
             newest = max(self._seen_at.values(), default=0)
             alive = self._alive
             units = dict(self._units)
+        # Still no units a minute after asking: the gateway was not listening
+        # when we did. Ask again, at most once a minute, until it answers.
+        if not units and time.time() - self._asked_at > 60:
+            self._ask_units()
         mode = v.get("mode")
         fan_mode = v.get("fan_mode")
         op = v.get("operating_state")
