@@ -1634,10 +1634,49 @@ def load_user(user_id: str):
     return User() if user_id == WEB_USERNAME else None
 
 
-# Failed-login throttling, keyed by client address. In-memory on purpose:
-# one process, one operator, and a restart clearing it is acceptable.
+# Failed-login throttling, keyed by client address. Persisted across
+# restarts now that the credential is a four-digit PIN: with ten thousand
+# possible values, the lockout is not a courtesy, it is the entire defence,
+# and a counter a restart could clear is a counter with no meaning. The
+# file is a small JSON map in the logs directory (root of the gitignore);
+# a missing or corrupt one is a cold start, never a hard failure.
+LOGIN_STATE_FILE = LOG_DIR / "login-failures.json"
 _login_failures: dict[str, tuple[int, float]] = {}
 _login_lock = threading.Lock()
+
+
+def _login_state_load() -> None:
+    """Restore lockouts a restart would otherwise wave through.
+
+    Counts survive with the lockout: five guesses before a restart plus
+    one after still means five guesses, which is the point of writing
+    them down at all.
+    """
+    try:
+        raw = json.loads(LOGIN_STATE_FILE.read_text())
+    except (OSError, ValueError):
+        return
+    with _login_lock:
+        for addr, pair in raw.items():
+            try:
+                _login_failures[addr] = (int(pair[0]), float(pair[1]))
+            except (TypeError, ValueError, IndexError):
+                continue
+
+
+def _login_state_save() -> None:
+    """The whole table, rewritten atomically. It is tiny; no cleverness."""
+    try:
+        LOGIN_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = LOGIN_STATE_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(
+            {a: [c, u] for a, (c, u) in _login_failures.items()}))
+        tmp.replace(LOGIN_STATE_FILE)
+    except OSError as exc:
+        log.warning("Could not persist login state: %s", exc)
+
+
+_login_state_load()
 
 
 def _lockout_remaining(addr: str) -> int:
@@ -1652,6 +1691,7 @@ def _note_failure(addr: str) -> None:
         count += 1
         until = time.time() + LOGIN_LOCKOUT_SECONDS if count >= LOGIN_MAX_ATTEMPTS else 0.0
         _login_failures[addr] = (count, until)
+    _login_state_save()
     if until:
         log.warning("Locking out %s for %ds after %d failed logins",
                     addr, LOGIN_LOCKOUT_SECONDS, count)
@@ -1660,6 +1700,7 @@ def _note_failure(addr: str) -> None:
 def _clear_failures(addr: str) -> None:
     with _login_lock:
         _login_failures.pop(addr, None)
+    _login_state_save()
 
 
 @app.after_request
